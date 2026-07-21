@@ -114,6 +114,30 @@ impl ModuleContext {
         self.resources.push(registration);
     }
 
+    pub fn remote_resource<M>(
+        &mut self,
+        resource: &'static str,
+        remote_path: &'static str,
+        serializer: ModelSerializer<M>,
+        filterset: FilterSet<M>,
+    ) where
+        M: SqliteModel<Id = i64>,
+    {
+        let registration = ResourceRegistration::from_remote_model::<M>(
+            resource,
+            remote_path,
+            serializer,
+            filterset,
+        );
+        self.api_endpoints.push(ApiEndpoint {
+            model_name: rust_type_name::<M>(),
+            resource: resource.to_string(),
+            fields: registration.fields.clone(),
+            filters: registration.filters.clone(),
+        });
+        self.resources.push(registration);
+    }
+
     pub fn model_schemas(&self) -> &[ModelSchema] {
         &self.schemas
     }

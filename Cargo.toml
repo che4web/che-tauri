@@ -9,6 +9,7 @@ che-orm = { path = "../che-orm/crates/che-orm" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
 tauri = "2"
 thiserror = "2"
 toml = "0.8"

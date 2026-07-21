@@ -49,6 +49,13 @@ pub struct ModelInvokeSet<M> {
     _model: PhantomData<M>,
 }
 
+pub struct RemoteInvokeSet<M> {
+    resource: &'static str,
+    remote_path: &'static str,
+    serializer: ModelSerializer<M>,
+    _model: PhantomData<M>,
+}
+
 impl<M> ModelInvokeSet<M>
 where
     M: SqliteModel<Id = i64>,
@@ -62,6 +69,24 @@ where
             resource,
             serializer,
             filterset,
+            _model: PhantomData,
+        }
+    }
+}
+
+impl<M> RemoteInvokeSet<M>
+where
+    M: SqliteModel<Id = i64>,
+{
+    pub fn new(
+        resource: &'static str,
+        remote_path: &'static str,
+        serializer: ModelSerializer<M>,
+    ) -> Self {
+        Self {
+            resource,
+            remote_path,
+            serializer,
             _model: PhantomData,
         }
     }
@@ -123,6 +148,65 @@ where
         M::objects(state.db()).get(id).await?;
         M::objects(state.db()).delete(id).await?;
         Ok(json!({ "deleted": true }))
+    }
+}
+
+#[async_trait]
+impl<M> InvokeResource for RemoteInvokeSet<M>
+where
+    M: SqliteModel<Id = i64>,
+{
+    fn resource(&self) -> &'static str {
+        self.resource
+    }
+
+    async fn list(&self, state: &AppState, params: HashMap<String, String>) -> ApiResult<Value> {
+        let response = remote_client()
+            .get(remote_url(state, self.remote_path)?)
+            .query(&params)
+            .send()
+            .await?;
+        remote_json(response).await
+    }
+
+    async fn retrieve(&self, state: &AppState, id: i64) -> ApiResult<Value> {
+        let response = remote_client()
+            .get(format!("{}/{}", remote_url(state, self.remote_path)?, id))
+            .send()
+            .await?;
+        remote_json(response).await
+    }
+
+    async fn create(&self, state: &AppState, payload: Value) -> ApiResult<Value> {
+        self.serializer.create_values(payload.clone())?;
+        let response = remote_client()
+            .post(remote_url(state, self.remote_path)?)
+            .json(&payload)
+            .send()
+            .await?;
+        remote_json(response).await
+    }
+
+    async fn update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
+        self.serializer.update_values(payload.clone())?;
+        let response = remote_client()
+            .patch(format!("{}/{}", remote_url(state, self.remote_path)?, id))
+            .json(&payload)
+            .send()
+            .await?;
+        remote_json(response).await
+    }
+
+    async fn delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
+        let response = remote_client()
+            .delete(format!("{}/{}", remote_url(state, self.remote_path)?, id))
+            .send()
+            .await?;
+        if response.status().is_success() {
+            Ok(json!({ "deleted": true }))
+        } else {
+            remote_error(response).await
+        }
     }
 }
 
@@ -204,6 +288,27 @@ impl ResourceRegistration {
             ))),
         }
     }
+
+    pub fn from_remote_model<M>(
+        resource: &'static str,
+        remote_path: &'static str,
+        serializer: ModelSerializer<M>,
+        filterset: FilterSet<M>,
+    ) -> Self
+    where
+        M: SqliteModel<Id = i64>,
+    {
+        Self {
+            resource,
+            fields: api_fields::<M>(serializer.fields()),
+            filters: api_filters::<M>(filterset.filters()),
+            invoke_resource: RegisteredResource::new(Box::new(RemoteInvokeSet::<M>::new(
+                resource,
+                remote_path,
+                serializer,
+            ))),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -275,6 +380,41 @@ fn required_id(id: Option<i64>, action: ApiAction) -> ApiResult<i64> {
 
 fn required_payload(payload: Option<Value>, action: ApiAction) -> ApiResult<Value> {
     payload.ok_or_else(|| ApiError::bad_request(format!("payload is required for {action:?}")))
+}
+
+fn remote_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+fn remote_url(state: &AppState, remote_path: &str) -> ApiResult<String> {
+    let remote = state.config.remote.as_ref().ok_or_else(|| {
+        ApiError::bad_request("remote resource requires [remote].base_url config")
+    })?;
+    Ok(format!(
+        "{}/{}",
+        remote.base_url.trim_end_matches('/'),
+        remote_path.trim_matches('/')
+    ))
+}
+
+async fn remote_json(response: reqwest::Response) -> ApiResult<Value> {
+    if response.status().is_success() {
+        Ok(response.json::<Value>().await?)
+    } else {
+        remote_error(response).await
+    }
+}
+
+async fn remote_error(response: reqwest::Response) -> ApiResult<Value> {
+    let status = response.status();
+    let detail = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "failed to read remote error response".to_string());
+    Err(ApiError::new(
+        "remote_error",
+        format!("remote request failed with {status}: {detail}"),
+    ))
 }
 
 fn api_fields<M>(fields: &[Field]) -> Vec<crate::ApiField>

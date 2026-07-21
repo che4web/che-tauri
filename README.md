@@ -40,6 +40,37 @@ impl AppModule for UsersModule {
 }
 ```
 
+For a remote REST-backed resource, use `remote_resource`. The model is used for serializers, filters, and TypeScript metadata, but no local SQLite table is created for that resource.
+
+```rust
+ctx.remote_resource::<models::User>(
+    "users",
+    "/api/users",
+    serializers::user_serializer(),
+    filters::user_filterset(),
+);
+```
+
+Remote resources use `[remote].base_url` from `app.toml`:
+
+```toml
+[database]
+url = "sqlite://app.sqlite?mode=rwc"
+
+[remote]
+base_url = "https://api.example.com"
+```
+
+REST mapping:
+
+```text
+list     GET    /api/users
+retrieve GET    /api/users/{id}
+create   POST   /api/users
+update   PATCH  /api/users/{id}
+delete   DELETE /api/users/{id}
+```
+
 ## Tauri Setup
 
 ```rust

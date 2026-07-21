@@ -55,6 +55,12 @@ impl From<che_orm::Error> for ApiError {
     }
 }
 
+impl From<reqwest::Error> for ApiError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::new("remote_error", error.to_string())
+    }
+}
+
 impl From<SerializerError> for ApiError {
     fn from(error: SerializerError) -> Self {
         Self::bad_request(error.to_string())

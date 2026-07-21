@@ -5,11 +5,17 @@ use crate::error::ApiResult;
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AppConfig {
     pub database: DatabaseConfig,
+    pub remote: Option<RemoteConfig>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct DatabaseConfig {
     pub url: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RemoteConfig {
+    pub base_url: String,
 }
 
 impl AppConfig {
