@@ -350,7 +350,7 @@ export function createModelApi<
   return {
     list(params) {
       return invoke<PaginatedResponse<T>>("che_api", {
-        request: { resource, action: "list", params: params ?? {} },
+        request: { resource, action: "list", params: serializeListParams(params) },
       });
     },
 
@@ -378,6 +378,18 @@ export function createModelApi<
       });
     },
   };
+}
+
+function serializeListParams(params?: ListParams) {
+  const serialized: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value !== null && value !== undefined) {
+      serialized[key] = String(value);
+    }
+  }
+
+  return serialized;
 }
 "#
 }
