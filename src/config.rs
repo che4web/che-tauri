@@ -16,6 +16,7 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RemoteConfig {
     pub base_url: String,
+    pub auth_path: Option<String>,
 }
 
 impl AppConfig {

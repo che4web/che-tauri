@@ -7,7 +7,9 @@ pub mod module;
 pub mod serializer;
 pub mod state;
 
-pub use api::{ApiAction, ApiRequest, ModelInvokeSet, RemoteInvokeSet, TauriApi, che_api};
+pub use api::{
+    ApiAction, ApiRequest, AuthTokenResponse, ModelInvokeSet, RemoteInvokeSet, TauriApi, che_api,
+};
 pub use config::{AppConfig, DatabaseConfig, RemoteConfig};
 pub use error::{ApiError, ApiResult};
 pub use filters::{Filter, FilterError, FilterSet, Lookup};

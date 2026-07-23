@@ -31,6 +31,17 @@ pub enum ApiAction {
     Delete,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AuthLoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AuthTokenResponse {
+    pub token: String,
+}
+
 #[async_trait]
 pub trait InvokeResource: Send + Sync {
     fn resource(&self) -> &'static str;
@@ -102,6 +113,16 @@ where
     }
 
     async fn list(&self, state: &AppState, params: HashMap<String, String>) -> ApiResult<Value> {
+        let count_params = params
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "limit" | "offset" | "ordering"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        let count = self
+            .filterset
+            .apply(M::objects(state.db()).query(), &count_params)?
+            .count()
+            .await?;
         let query = self
             .filterset
             .apply(M::objects(state.db()).query(), &params)?;
@@ -112,7 +133,7 @@ where
         }
 
         Ok(json!({
-            "count": results.len(),
+            "count": count,
             "results": results,
         }))
     }
@@ -161,47 +182,57 @@ where
     }
 
     async fn list(&self, state: &AppState, params: HashMap<String, String>) -> ApiResult<Value> {
-        let response = remote_client()
-            .get(remote_url(state, self.remote_path)?)
-            .query(&params)
-            .send()
-            .await?;
+        let response = with_token(
+            state,
+            remote_client().get(remote_url(state, self.remote_path)?),
+        )?
+        .query(&params)
+        .send()
+        .await?;
         remote_json(response).await
     }
 
     async fn retrieve(&self, state: &AppState, id: i64) -> ApiResult<Value> {
-        let response = remote_client()
-            .get(format!("{}/{}", remote_url(state, self.remote_path)?, id))
-            .send()
-            .await?;
+        let response = with_token(
+            state,
+            remote_client().get(format!("{}/{}", remote_url(state, self.remote_path)?, id)),
+        )?
+        .send()
+        .await?;
         remote_json(response).await
     }
 
     async fn create(&self, state: &AppState, payload: Value) -> ApiResult<Value> {
         self.serializer.create_values(payload.clone())?;
-        let response = remote_client()
-            .post(remote_url(state, self.remote_path)?)
-            .json(&payload)
-            .send()
-            .await?;
+        let response = with_token(
+            state,
+            remote_client().post(remote_url(state, self.remote_path)?),
+        )?
+        .json(&payload)
+        .send()
+        .await?;
         remote_json(response).await
     }
 
     async fn update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
         self.serializer.update_values(payload.clone())?;
-        let response = remote_client()
-            .patch(format!("{}/{}", remote_url(state, self.remote_path)?, id))
-            .json(&payload)
-            .send()
-            .await?;
+        let response = with_token(
+            state,
+            remote_client().patch(format!("{}/{}", remote_url(state, self.remote_path)?, id)),
+        )?
+        .json(&payload)
+        .send()
+        .await?;
         remote_json(response).await
     }
 
     async fn delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
-        let response = remote_client()
-            .delete(format!("{}/{}", remote_url(state, self.remote_path)?, id))
-            .send()
-            .await?;
+        let response = with_token(
+            state,
+            remote_client().delete(format!("{}/{}", remote_url(state, self.remote_path)?, id)),
+        )?
+        .send()
+        .await?;
         if response.status().is_success() {
             Ok(json!({ "deleted": true }))
         } else {
@@ -364,6 +395,35 @@ impl TauriApi {
     pub fn state(&self) -> &AppState {
         &self.state
     }
+
+    pub async fn login(&self, username: String, password: String) -> ApiResult<AuthTokenResponse> {
+        let response = remote_client()
+            .post(remote_auth_url(&self.state)?)
+            .json(&AuthLoginRequest { username, password })
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let token = response.json::<AuthTokenResponse>().await?;
+            self.state.set_auth_token(token.token.clone());
+            Ok(token)
+        } else {
+            remote_error(response).await?;
+            unreachable!()
+        }
+    }
+
+    pub fn set_auth_token(&self, token: String) {
+        self.state.set_auth_token(token);
+    }
+
+    pub fn logout(&self) {
+        self.state.clear_auth_token();
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        self.state.auth_token().is_some()
+    }
 }
 
 #[tauri::command]
@@ -393,8 +453,34 @@ fn remote_url(state: &AppState, remote_path: &str) -> ApiResult<String> {
     Ok(format!(
         "{}/{}",
         remote.base_url.trim_end_matches('/'),
-        remote_path.trim_matches('/')
+        remote_path.trim_start_matches('/')
     ))
+}
+
+fn remote_auth_url(state: &AppState) -> ApiResult<String> {
+    let remote = state
+        .config
+        .remote
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("auth requires [remote].base_url config"))?;
+    let auth_path = remote.auth_path.as_deref().unwrap_or("/api-token-auth/");
+
+    Ok(format!(
+        "{}/{}",
+        remote.base_url.trim_end_matches('/'),
+        auth_path.trim_start_matches('/')
+    ))
+}
+
+fn with_token(
+    state: &AppState,
+    request: reqwest::RequestBuilder,
+) -> ApiResult<reqwest::RequestBuilder> {
+    let token = state
+        .auth_token()
+        .ok_or_else(|| ApiError::new("not_authenticated", "authentication token is missing"))?;
+
+    Ok(request.header(reqwest::header::AUTHORIZATION, format!("Token {token}")))
 }
 
 async fn remote_json(response: reqwest::Response) -> ApiResult<Value> {
