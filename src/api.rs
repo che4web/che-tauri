@@ -63,7 +63,6 @@ pub struct ModelInvokeSet<M> {
 pub struct RemoteInvokeSet<M> {
     resource: &'static str,
     remote_path: &'static str,
-    serializer: ModelSerializer<M>,
     _model: PhantomData<M>,
 }
 
@@ -92,12 +91,10 @@ where
     pub fn new(
         resource: &'static str,
         remote_path: &'static str,
-        serializer: ModelSerializer<M>,
     ) -> Self {
         Self {
             resource,
             remote_path,
-            serializer,
             _model: PhantomData,
         }
     }
@@ -195,7 +192,11 @@ where
     async fn retrieve(&self, state: &AppState, id: i64) -> ApiResult<Value> {
         let response = with_token(
             state,
-            remote_client().get(format!("{}/{}", remote_url(state, self.remote_path)?, id)),
+            remote_client().get(format!(
+                "{}/{}",
+                remote_url(state, self.remote_path)?.trim_end_matches('/'),
+                id
+            )),
         )?
         .send()
         .await?;
@@ -203,7 +204,6 @@ where
     }
 
     async fn create(&self, state: &AppState, payload: Value) -> ApiResult<Value> {
-        self.serializer.create_values(payload.clone())?;
         let response = with_token(
             state,
             remote_client().post(remote_url(state, self.remote_path)?),
@@ -215,10 +215,13 @@ where
     }
 
     async fn update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
-        self.serializer.update_values(payload.clone())?;
         let response = with_token(
             state,
-            remote_client().patch(format!("{}/{}", remote_url(state, self.remote_path)?, id)),
+            remote_client().patch(format!(
+                "{}/{}",
+                remote_url(state, self.remote_path)?.trim_end_matches('/'),
+                id
+            )),
         )?
         .json(&payload)
         .send()
@@ -229,7 +232,11 @@ where
     async fn delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
         let response = with_token(
             state,
-            remote_client().delete(format!("{}/{}", remote_url(state, self.remote_path)?, id)),
+            remote_client().delete(format!(
+                "{}/{}",
+                remote_url(state, self.remote_path)?.trim_end_matches('/'),
+                id
+            )),
         )?
         .send()
         .await?;
@@ -334,9 +341,7 @@ impl ResourceRegistration {
             fields: api_fields::<M>(serializer.fields()),
             filters: api_filters::<M>(filterset.filters()),
             invoke_resource: RegisteredResource::new(Box::new(RemoteInvokeSet::<M>::new(
-                resource,
-                remote_path,
-                serializer,
+                resource, remote_path,
             ))),
         }
     }
@@ -453,7 +458,7 @@ fn remote_url(state: &AppState, remote_path: &str) -> ApiResult<String> {
     Ok(format!(
         "{}/{}",
         remote.base_url.trim_end_matches('/'),
-        remote_path.trim_start_matches('/')
+        remote_path.trim_matches('/')
     ))
 }
 
@@ -468,7 +473,7 @@ fn remote_auth_url(state: &AppState) -> ApiResult<String> {
     Ok(format!(
         "{}/{}",
         remote.base_url.trim_end_matches('/'),
-        auth_path.trim_start_matches('/')
+        auth_path.trim_matches('/')
     ))
 }
 
