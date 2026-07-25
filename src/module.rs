@@ -123,7 +123,43 @@ impl ModuleContext {
     ) where
         M: SqliteModel<Id = i64>,
     {
+        self.mapped_remote_resource(resource, remote_path, serializer, filterset);
+    }
+
+    pub fn raw_remote_resource<M>(
+        &mut self,
+        resource: &'static str,
+        remote_path: &'static str,
+        serializer: ModelSerializer<M>,
+        filterset: FilterSet<M>,
+    ) where
+        M: SqliteModel<Id = i64>,
+    {
         let registration = ResourceRegistration::from_remote_model::<M>(
+            resource,
+            remote_path,
+            serializer,
+            filterset,
+        );
+        self.api_endpoints.push(ApiEndpoint {
+            model_name: rust_type_name::<M>(),
+            resource: resource.to_string(),
+            fields: registration.fields.clone(),
+            filters: registration.filters.clone(),
+        });
+        self.resources.push(registration);
+    }
+
+    pub fn mapped_remote_resource<M>(
+        &mut self,
+        resource: &'static str,
+        remote_path: &'static str,
+        serializer: ModelSerializer<M>,
+        filterset: FilterSet<M>,
+    ) where
+        M: SqliteModel<Id = i64>,
+    {
+        let registration = ResourceRegistration::from_mapped_remote_model::<M>(
             resource,
             remote_path,
             serializer,

@@ -1,6 +1,7 @@
 use std::{collections::HashMap, marker::PhantomData};
 
 use che_orm::{FieldInfo, FieldType, Model, QueryBuilder, SqliteModel, SqliteValue};
+use serde_json::Value;
 
 use crate::error::ApiResult;
 
@@ -14,11 +15,21 @@ pub enum Lookup {
     Lte,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteFilterMode {
+    Forward,
+    LocalOnly,
+    RemoteOnly,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Filter {
     pub name: &'static str,
     pub source: &'static str,
     pub lookup: Lookup,
+    pub remote_name: Option<&'static str>,
+    pub remote_mode: RemoteFilterMode,
 }
 
 impl Filter {
@@ -46,6 +57,10 @@ impl Filter {
         Self::new(name, name, Lookup::Lte)
     }
 
+    pub const fn remote_only(name: &'static str) -> Self {
+        Self::new(name, name, Lookup::Exact).remote_only_mode()
+    }
+
     pub const fn exact_source(name: &'static str, source: &'static str) -> Self {
         Self::new(name, source, Lookup::Exact)
     }
@@ -55,7 +70,29 @@ impl Filter {
             name,
             source,
             lookup,
+            remote_name: None,
+            remote_mode: RemoteFilterMode::Forward,
         }
+    }
+
+    pub const fn remote(mut self, name: &'static str) -> Self {
+        self.remote_name = Some(name);
+        self
+    }
+
+    pub const fn local_only(mut self) -> Self {
+        self.remote_mode = RemoteFilterMode::LocalOnly;
+        self
+    }
+
+    pub const fn remote_disabled(mut self) -> Self {
+        self.remote_mode = RemoteFilterMode::Disabled;
+        self
+    }
+
+    const fn remote_only_mode(mut self) -> Self {
+        self.remote_mode = RemoteFilterMode::RemoteOnly;
+        self
     }
 
     pub fn query_name(&self) -> String {
@@ -73,6 +110,7 @@ impl Filter {
 #[derive(Debug)]
 pub struct FilterSet<M> {
     filters: &'static [Filter],
+    remote_ordering: Option<&'static str>,
     _model: PhantomData<M>,
 }
 
@@ -91,12 +129,95 @@ where
     pub const fn new(filters: &'static [Filter]) -> Self {
         Self {
             filters,
+            remote_ordering: None,
             _model: PhantomData,
         }
     }
 
+    pub const fn remote_ordering(mut self, name: &'static str) -> Self {
+        self.remote_ordering = Some(name);
+        self
+    }
+
     pub fn filters(&self) -> &'static [Filter] {
         self.filters
+    }
+
+    pub fn remote_params(&self, params: &HashMap<String, String>) -> HashMap<String, String> {
+        let mut remote = HashMap::new();
+
+        for (name, value) in params {
+            if value.is_empty() {
+                continue;
+            }
+
+            match name.as_str() {
+                "limit" | "offset" => {
+                    remote.insert(name.clone(), value.clone());
+                }
+                "ordering" => {
+                    remote.insert(
+                        self.remote_ordering.unwrap_or("ordering").to_string(),
+                        self.remote_ordering_value(value),
+                    );
+                }
+                name => {
+                    let Some(filter) = self.filter_by_query_name(name) else {
+                        remote.insert(name.to_string(), value.clone());
+                        continue;
+                    };
+
+                    match filter.remote_mode {
+                        RemoteFilterMode::Forward | RemoteFilterMode::RemoteOnly => {
+                            remote.insert(filter.remote_query_name(), value.clone());
+                        }
+                        RemoteFilterMode::LocalOnly | RemoteFilterMode::Disabled => {}
+                    }
+                }
+            }
+        }
+
+        remote
+    }
+
+    pub fn apply_json(&self, value: Value, params: &HashMap<String, String>) -> Value {
+        let local_filters = params
+            .iter()
+            .filter_map(|(name, value)| {
+                let filter = self.filter_by_query_name(name)?;
+                if filter.remote_mode == RemoteFilterMode::LocalOnly && !value.is_empty() {
+                    Some((filter, value.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if local_filters.is_empty() {
+            return value;
+        }
+
+        let Some(mut object) = value.as_object().cloned() else {
+            return value;
+        };
+        let Some(results) = object.get("results").and_then(Value::as_array) else {
+            return Value::Object(object);
+        };
+
+        let filtered = results
+            .iter()
+            .filter(|item| {
+                local_filters
+                    .iter()
+                    .all(|(filter, value)| json_item_matches_filter(item, filter, value))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        object.insert("count".to_string(), Value::from(filtered.len()));
+        object.insert("results".to_string(), Value::Array(filtered));
+
+        Value::Object(object)
     }
 
     pub fn apply<'db>(
@@ -117,10 +238,13 @@ where
                 }
                 name => {
                     let filter = self
-                        .filters
-                        .iter()
-                        .find(|filter| filter.query_name() == name)
+                        .filter_by_query_name(name)
                         .ok_or_else(|| FilterError::UnknownFilter(name.to_string()))?;
+
+                    if filter.remote_mode == RemoteFilterMode::RemoteOnly {
+                        continue;
+                    }
+
                     let field = model_field::<M>(filter.source)?;
                     validate_lookup(field, filter.lookup)?;
                     let value = parse_value(field, value)?;
@@ -137,6 +261,29 @@ where
         }
 
         Ok(query)
+    }
+
+    fn filter_by_query_name(&self, name: &str) -> Option<&'static Filter> {
+        self.filters
+            .iter()
+            .find(|filter| filter.query_name() == name)
+    }
+
+    fn remote_ordering_value(&self, value: &str) -> String {
+        let descending = value.starts_with('-');
+        let field = value.strip_prefix('-').unwrap_or(value);
+        let remote_field = self
+            .filters
+            .iter()
+            .find(|filter| filter.name == field)
+            .and_then(|filter| filter.remote_name)
+            .unwrap_or(field);
+
+        if descending {
+            format!("-{remote_field}")
+        } else {
+            remote_field.to_string()
+        }
     }
 
     fn apply_ordering<'db>(
@@ -161,6 +308,47 @@ where
         } else {
             query.order_by(source)
         })
+    }
+}
+
+impl Filter {
+    fn remote_query_name(&self) -> String {
+        self.remote_name
+            .map(str::to_string)
+            .unwrap_or_else(|| self.query_name())
+    }
+}
+
+fn json_item_matches_filter(item: &Value, filter: &Filter, expected: &str) -> bool {
+    let Some(value) = json_lookup(item, filter.name).or_else(|| json_lookup(item, filter.source)) else {
+        return false;
+    };
+
+    match filter.lookup {
+        Lookup::Exact => json_value_text(value).is_some_and(|value| value == expected),
+        Lookup::Contains => {
+            let expected = expected.to_lowercase();
+            json_value_text(value).is_some_and(|value| value.to_lowercase().contains(&expected))
+        }
+        Lookup::Gt | Lookup::Gte | Lookup::Lt | Lookup::Lte => true,
+    }
+}
+
+fn json_lookup<'a>(item: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut value = item;
+    for part in path.split('.') {
+        value = value.as_object()?.get(part)?;
+    }
+    Some(value)
+}
+
+fn json_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Null => None,
+        Value::Object(_) | Value::Array(_) => None,
     }
 }
 

@@ -70,6 +70,7 @@ pub struct Field {
     pub nullable: bool,
     pub max_length: Option<u32>,
     pub relation: Option<&'static dyn RelatedSerializer>,
+    pub json: bool,
     default: Option<fn() -> Value>,
 }
 
@@ -84,6 +85,22 @@ impl Field {
             nullable: false,
             max_length: None,
             relation: None,
+            json: false,
+            default: None,
+        }
+    }
+
+    pub const fn json(name: &'static str) -> Self {
+        Self {
+            name,
+            source: name,
+            required: true,
+            read_only: false,
+            write_only: false,
+            nullable: false,
+            max_length: None,
+            relation: None,
+            json: true,
             default: None,
         }
     }
@@ -102,6 +119,7 @@ impl Field {
             nullable: false,
             max_length: None,
             relation: Some(relation),
+            json: false,
             default: None,
         }
     }
@@ -244,6 +262,85 @@ impl<M: Model> ModelSerializer<M> {
 
         validated_values::<M>(value, &fields)
     }
+
+    pub fn normalize_remote_value(&self, value: Value) -> Value {
+        normalize_remote_object::<M>(value, self.fields)
+    }
+}
+
+pub fn normalize_remote_object<M: Model>(value: Value, fields: &[Field]) -> Value {
+    let Some(remote) = value.as_object() else {
+        return value;
+    };
+
+    let mut object = Map::new();
+
+    for field in fields {
+        if field.write_only {
+            continue;
+        }
+
+        let raw_value = lookup_remote_value(remote, field.source)
+            .or_else(|| lookup_remote_value(remote, field.name));
+        let value = if field.json {
+            raw_value.cloned().unwrap_or_else(|| default_remote_value::<M>(field))
+        } else if field.relation.is_some() {
+            match raw_value {
+                Some(Value::Object(_)) => raw_value.cloned().unwrap_or(Value::Null),
+                _ => Value::Null,
+            }
+        } else {
+            normalize_remote_field_value::<M>(field, raw_value)
+        };
+
+        object.insert(field.name.to_string(), value);
+    }
+
+    Value::Object(object)
+}
+
+fn lookup_remote_value<'a>(object: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+    let mut parts = path.split('.');
+    let first = parts.next()?;
+    let mut value = object.get(first)?;
+
+    for part in parts {
+        value = value.as_object()?.get(part)?;
+    }
+
+    Some(value)
+}
+
+fn normalize_remote_field_value<M: Model>(field: &Field, value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::Object(object)) if field.name.ends_with("_id") => {
+            object.get("id").cloned().unwrap_or(Value::Null)
+        }
+        Some(value) if !value.is_null() => value.clone(),
+        _ => default_remote_value::<M>(field),
+    }
+}
+
+fn default_remote_value<M: Model>(field: &Field) -> Value {
+    if let Some(default) = field.default {
+        return default();
+    }
+
+    let model_field = M::fields()
+        .iter()
+        .find(|model_field| model_field.db_name == field.name || model_field.rust_name == field.name);
+
+    match model_field {
+        Some(model_field) if model_field.nullable || field.nullable => Value::Null,
+        Some(model_field) => match model_field.ty {
+            FieldType::Text => Value::String(String::new()),
+            FieldType::Integer => Value::from(0),
+            FieldType::Boolean => Value::from(false),
+            FieldType::Real => Value::from(0.0),
+        },
+        None if field.nullable => Value::Null,
+        None => Value::Null,
+    }
 }
 
 pub fn serialize_model<M: Model>(model: &M, fields: &[Field]) -> Value {
@@ -258,7 +355,7 @@ pub fn serialize_model<M: Model>(model: &M, fields: &[Field]) -> Value {
             .get_value(field.source)
             .or_else(|| model.get_value(field.name))
             .unwrap_or(Value::Null);
-        object.insert(field.name.to_string(), value);
+        object.insert(field.name.to_string(), serialize_json_field(field, value));
     }
 
     Value::Object(object)
@@ -293,10 +390,22 @@ pub async fn serialize_model_async<M: Model>(
             .get_value(field.source)
             .or_else(|| model.get_value(field.name))
             .unwrap_or(Value::Null);
-        object.insert(field.name.to_string(), value);
+        object.insert(field.name.to_string(), serialize_json_field(field, value));
     }
 
     Ok(Value::Object(object))
+}
+
+fn serialize_json_field(field: &Field, value: Value) -> Value {
+    if !field.json {
+        return value;
+    }
+
+    match value {
+        Value::String(string) => serde_json::from_str(&string).unwrap_or(Value::Null),
+        Value::Null => Value::Null,
+        value => value,
+    }
 }
 
 pub fn validate_object<M: Model>(value: Value, fields: &[Field]) -> Result<Map<String, Value>> {
@@ -330,6 +439,11 @@ pub fn validate_object<M: Model>(value: Value, fields: &[Field]) -> Result<Map<S
                 validated.insert(field.source.to_string(), Value::Null);
             }
             Some(value) => {
+                if field.json {
+                    validated.insert(field.source.to_string(), Value::String(value.to_string()));
+                    continue;
+                }
+
                 validate_type(field.name, model_field.ty, value)?;
                 if let Some(max_length) = field.max_length {
                     validate_max_length(field.name, max_length, value)?;
