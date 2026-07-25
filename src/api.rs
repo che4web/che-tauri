@@ -621,7 +621,7 @@ fn remote_url(state: &AppState, remote_path: &str) -> ApiResult<String> {
     Ok(format!(
         "{}/{}",
         remote.base_url.trim_end_matches('/'),
-        remote_path.trim_matches('/')
+        remote_path.trim_start_matches('/')
     ))
 }
 
