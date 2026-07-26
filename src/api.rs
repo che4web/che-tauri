@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData};
+use std::{collections::HashMap, marker::PhantomData, time::Duration};
 
 use async_trait::async_trait;
 use che_orm::SqliteModel;
@@ -611,11 +611,15 @@ fn required_payload(payload: Option<Value>, action: ApiAction) -> ApiResult<Valu
 }
 
 fn remote_client() -> reqwest::Client {
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .expect("failed to build reqwest client")
 }
 
 fn remote_url(state: &AppState, remote_path: &str) -> ApiResult<String> {
-    let remote = state.config.remote.as_ref().ok_or_else(|| {
+    let remote = state.remote_config().ok_or_else(|| {
         ApiError::bad_request("remote resource requires [remote].base_url config")
     })?;
     Ok(format!(
@@ -627,16 +631,14 @@ fn remote_url(state: &AppState, remote_path: &str) -> ApiResult<String> {
 
 fn remote_auth_url(state: &AppState) -> ApiResult<String> {
     let remote = state
-        .config
-        .remote
-        .as_ref()
+        .remote_config()
         .ok_or_else(|| ApiError::bad_request("auth requires [remote].base_url config"))?;
     let auth_path = remote.auth_path.as_deref().unwrap_or("/api-token-auth/");
 
     Ok(format!(
         "{}/{}",
         remote.base_url.trim_end_matches('/'),
-        auth_path.trim_matches('/')
+        auth_path.trim_start_matches('/')
     ))
 }
 
