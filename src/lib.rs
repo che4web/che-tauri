@@ -8,8 +8,8 @@ pub mod serializer;
 pub mod state;
 
 pub use api::{
-    ApiAction, ApiRequest, AuthTokenResponse, MappedRemoteInvokeSet, ModelInvokeSet,
-    RawRemoteInvokeSet, TauriApi, che_api,
+    ApiAction, ApiRequest, AuthTokenResponse, CachedMappedRemoteInvokeSet, MappedRemoteInvokeSet,
+    ModelInvokeSet, RawRemoteInvokeSet, TauriApi, che_api,
 };
 pub use config::{AppConfig, DatabaseConfig, RemoteConfig};
 pub use error::{ApiError, ApiResult};

@@ -9,6 +9,7 @@ use crate::{
     AppState, Field, Filter, FilterSet, ModelSerializer,
     error::{ApiError, ApiResult},
     module::InstalledApps,
+    serializer::upsert_normalized_model,
 };
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +75,14 @@ pub struct MappedRemoteInvokeSet<M> {
     _model: PhantomData<M>,
 }
 
+pub struct CachedMappedRemoteInvokeSet<M> {
+    resource: &'static str,
+    remote_path: &'static str,
+    serializer: ModelSerializer<M>,
+    filterset: FilterSet<M>,
+    _model: PhantomData<M>,
+}
+
 impl<M> ModelInvokeSet<M>
 where
     M: SqliteModel<Id = i64>,
@@ -106,6 +115,26 @@ where
 }
 
 impl<M> MappedRemoteInvokeSet<M>
+where
+    M: SqliteModel<Id = i64>,
+{
+    pub fn new(
+        resource: &'static str,
+        remote_path: &'static str,
+        serializer: ModelSerializer<M>,
+        filterset: FilterSet<M>,
+    ) -> Self {
+        Self {
+            resource,
+            remote_path,
+            serializer,
+            filterset,
+            _model: PhantomData,
+        }
+    }
+}
+
+impl<M> CachedMappedRemoteInvokeSet<M>
 where
     M: SqliteModel<Id = i64>,
 {
@@ -357,6 +386,124 @@ where
     }
 }
 
+#[async_trait]
+impl<M> InvokeResource for CachedMappedRemoteInvokeSet<M>
+where
+    M: SqliteModel<Id = i64>,
+{
+    fn resource(&self) -> &'static str {
+        self.resource
+    }
+
+    async fn list(&self, state: &AppState, params: HashMap<String, String>) -> ApiResult<Value> {
+        let force_remote = params
+            .get("force_remote")
+            .is_some_and(|value| value == "true");
+        let mut local_params = params.clone();
+        local_params.remove("force_remote");
+
+        if !force_remote {
+            if let Ok(local_value) =
+                local_list::<M>(state, &self.serializer, &self.filterset, &local_params).await
+            {
+                if local_value
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .is_some_and(|results| !results.is_empty())
+                {
+                    return Ok(local_value);
+                }
+            }
+        }
+
+        let remote_params = self.filterset.remote_params(&local_params);
+        let response = with_token(
+            state,
+            remote_client().get(remote_url(state, self.remote_path)?),
+        )?
+        .query(&remote_params)
+        .send()
+        .await?;
+        let value = remote_json(response).await?;
+        let value = normalize_remote_list(value, self.serializer);
+        cache_normalized_list::<M>(state, self.serializer, &value).await?;
+        Ok(self.filterset.apply_json(value, &local_params))
+    }
+
+    async fn retrieve(&self, state: &AppState, id: i64) -> ApiResult<Value> {
+        if let Ok(Some(value)) = local_retrieve::<M>(state, &self.serializer, id).await {
+            return Ok(value);
+        }
+
+        let response = with_token(
+            state,
+            remote_client().get(format!(
+                "{}/{}/",
+                remote_url(state, self.remote_path)?.trim_end_matches('/'),
+                id
+            )),
+        )?
+        .send()
+        .await?;
+        let value = remote_json(response).await?;
+        let value = self.serializer.normalize_remote_value(value);
+        upsert_normalized_model(state.db(), self.serializer, value.clone()).await?;
+        Ok(value)
+    }
+
+    async fn create(&self, state: &AppState, payload: Value) -> ApiResult<Value> {
+        let response = with_token(
+            state,
+            remote_client().post(remote_url(state, self.remote_path)?),
+        )?
+        .json(&payload)
+        .send()
+        .await?;
+        let value = remote_json(response).await?;
+        let value = self.serializer.normalize_remote_value(value);
+        upsert_normalized_model(state.db(), self.serializer, value.clone()).await?;
+        Ok(value)
+    }
+
+    async fn update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
+        let response = with_token(
+            state,
+            remote_client().patch(format!(
+                "{}/{}/",
+                remote_url(state, self.remote_path)?.trim_end_matches('/'),
+                id
+            )),
+        )?
+        .json(&payload)
+        .send()
+        .await?;
+        let value = remote_json(response).await?;
+        let value = self.serializer.normalize_remote_value(value);
+        upsert_normalized_model(state.db(), self.serializer, value.clone()).await?;
+        Ok(value)
+    }
+
+    async fn delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
+        let response = with_token(
+            state,
+            remote_client().delete(format!(
+                "{}/{}/",
+                remote_url(state, self.remote_path)?.trim_end_matches('/'),
+                id
+            )),
+        )?
+        .send()
+        .await?;
+
+        if response.status().is_success() {
+            M::objects(state.db()).delete(id).await?;
+            Ok(json!({ "deleted": true }))
+        } else {
+            remote_error(response).await
+        }
+    }
+}
+
 pub struct RegisteredResource {
     inner: Box<dyn InvokeResource>,
 }
@@ -450,7 +597,8 @@ impl ResourceRegistration {
             fields: api_fields::<M>(serializer.fields()),
             filters: api_filters::<M>(filterset.filters()),
             invoke_resource: RegisteredResource::new(Box::new(RawRemoteInvokeSet::<M>::new(
-                resource, remote_path,
+                resource,
+                remote_path,
             ))),
         }
     }
@@ -469,10 +617,101 @@ impl ResourceRegistration {
             fields: api_fields::<M>(serializer.fields()),
             filters: api_filters::<M>(filterset.filters()),
             invoke_resource: RegisteredResource::new(Box::new(MappedRemoteInvokeSet::<M>::new(
-                resource, remote_path, serializer, filterset,
+                resource,
+                remote_path,
+                serializer,
+                filterset,
             ))),
         }
     }
+
+    pub fn from_cached_mapped_remote_model<M>(
+        resource: &'static str,
+        remote_path: &'static str,
+        serializer: ModelSerializer<M>,
+        filterset: FilterSet<M>,
+    ) -> Self
+    where
+        M: SqliteModel<Id = i64>,
+    {
+        Self {
+            resource,
+            fields: api_fields::<M>(serializer.fields()),
+            filters: api_filters::<M>(filterset.filters()),
+            invoke_resource: RegisteredResource::new(Box::new(
+                CachedMappedRemoteInvokeSet::<M>::new(resource, remote_path, serializer, filterset),
+            )),
+        }
+    }
+}
+
+async fn local_list<M>(
+    state: &AppState,
+    serializer: &ModelSerializer<M>,
+    filterset: &FilterSet<M>,
+    params: &HashMap<String, String>,
+) -> ApiResult<Value>
+where
+    M: SqliteModel<Id = i64>,
+{
+    let count_params = params
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "limit" | "offset" | "ordering"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<HashMap<_, _>>();
+    let count = filterset
+        .apply(M::objects(state.db()).query(), &count_params)?
+        .count()
+        .await?;
+    let query = filterset.apply(M::objects(state.db()).query(), params)?;
+    let models = query.all().await?;
+    let mut results = Vec::with_capacity(models.len());
+    for model in &models {
+        results.push(serializer.to_json_async(state.db(), model).await?);
+    }
+
+    Ok(json!({
+        "count": count,
+        "results": results,
+    }))
+}
+
+async fn local_retrieve<M>(
+    state: &AppState,
+    serializer: &ModelSerializer<M>,
+    id: i64,
+) -> ApiResult<Option<Value>>
+where
+    M: SqliteModel<Id = i64>,
+{
+    match M::objects(state.db()).get(id).await {
+        Ok(model) => Ok(Some(serializer.to_json_async(state.db(), &model).await?)),
+        Err(che_orm::Error::Database(sqlx_error))
+            if matches!(sqlx_error, che_orm::__private::sqlx::Error::RowNotFound) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(ApiError::new("database_error", error.to_string())),
+    }
+}
+
+async fn cache_normalized_list<M>(
+    state: &AppState,
+    serializer: ModelSerializer<M>,
+    value: &Value,
+) -> ApiResult<()>
+where
+    M: SqliteModel<Id = i64>,
+{
+    let Some(results) = value.get("results").and_then(Value::as_array) else {
+        return Ok(());
+    };
+
+    for item in results {
+        upsert_normalized_model(state.db(), serializer, item.clone()).await?;
+    }
+
+    Ok(())
 }
 
 fn normalize_remote_list<M: che_orm::Model>(value: Value, serializer: ModelSerializer<M>) -> Value {
@@ -680,14 +919,12 @@ where
     fields
         .iter()
         .filter_map(|field| {
-            let model_field = M::fields()
-                .iter()
-                .find(|model_field| {
-                    model_field.db_name == field.source
-                        || model_field.rust_name == field.source
-                        || model_field.db_name == field.name
-                        || model_field.rust_name == field.name
-                })?;
+            let model_field = M::fields().iter().find(|model_field| {
+                model_field.db_name == field.source
+                    || model_field.rust_name == field.source
+                    || model_field.db_name == field.name
+                    || model_field.rust_name == field.name
+            })?;
             Some(crate::ApiField {
                 name: field.name.to_string(),
                 source: field.source.to_string(),
@@ -695,6 +932,8 @@ where
                 related_model: field
                     .relation
                     .map(|relation| relation.model_name().to_string()),
+                ts_type: field.ts_type.map(ToString::to_string),
+                input_ts_type: field.input_ts_type.map(ToString::to_string),
                 read_only: field.read_only,
                 write_only: field.write_only,
                 required: field.required,

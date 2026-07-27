@@ -60,6 +60,8 @@ pub struct ApiField {
     pub source: String,
     pub ty: FieldType,
     pub related_model: Option<String>,
+    pub ts_type: Option<String>,
+    pub input_ts_type: Option<String>,
     pub read_only: bool,
     pub write_only: bool,
     pub required: bool,
@@ -165,6 +167,31 @@ impl ModuleContext {
             serializer,
             filterset,
         );
+        self.api_endpoints.push(ApiEndpoint {
+            model_name: rust_type_name::<M>(),
+            resource: resource.to_string(),
+            fields: registration.fields.clone(),
+            filters: registration.filters.clone(),
+        });
+        self.resources.push(registration);
+    }
+
+    pub fn cached_mapped_remote_resource<M>(
+        &mut self,
+        resource: &'static str,
+        remote_path: &'static str,
+        serializer: ModelSerializer<M>,
+        filterset: FilterSet<M>,
+    ) where
+        M: SqliteModel<Id = i64>,
+    {
+        let registration = ResourceRegistration::from_cached_mapped_remote_model::<M>(
+            resource,
+            remote_path,
+            serializer,
+            filterset,
+        );
+        self.model::<M>();
         self.api_endpoints.push(ApiEndpoint {
             model_name: rust_type_name::<M>(),
             resource: resource.to_string(),

@@ -5,7 +5,10 @@ use std::{
 
 use che_orm::SqliteBackend;
 
-use crate::{config::{AppConfig, RemoteConfig}, error::ApiResult};
+use crate::{
+    config::{AppConfig, RemoteConfig},
+    error::ApiResult,
+};
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -31,7 +34,10 @@ impl AppState {
     }
 
     pub fn config(&self) -> AppConfig {
-        self.config.read().expect("app config lock poisoned").clone()
+        self.config
+            .read()
+            .expect("app config lock poisoned")
+            .clone()
     }
 
     pub fn remote_config(&self) -> Option<RemoteConfig> {
@@ -39,7 +45,10 @@ impl AppState {
     }
 
     pub fn set_remote_config(&self, remote: Option<RemoteConfig>) {
-        self.config.write().expect("app config lock poisoned").remote = remote;
+        self.config
+            .write()
+            .expect("app config lock poisoned")
+            .remote = remote;
     }
 
     pub fn db(&self) -> &SqliteBackend {

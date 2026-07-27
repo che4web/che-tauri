@@ -11,6 +11,12 @@ pub trait RelatedSerializer: std::fmt::Debug + Send + Sync {
         db: &'a SqliteBackend,
         id: i64,
     ) -> Pin<Box<dyn Future<Output = che_orm::Result<Value>> + Send + 'a>>;
+
+    fn cache_json<'a>(
+        &'a self,
+        db: &'a SqliteBackend,
+        value: Value,
+    ) -> Pin<Box<dyn Future<Output = che_orm::Result<()>> + Send + 'a>>;
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +64,14 @@ where
             (self.serializer)().to_json_async(db, &model).await
         })
     }
+
+    fn cache_json<'a>(
+        &'a self,
+        db: &'a SqliteBackend,
+        value: Value,
+    ) -> Pin<Box<dyn Future<Output = che_orm::Result<()>> + Send + 'a>> {
+        Box::pin(async move { upsert_normalized_model(db, (self.serializer)(), value).await })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +85,8 @@ pub struct Field {
     pub max_length: Option<u32>,
     pub relation: Option<&'static dyn RelatedSerializer>,
     pub json: bool,
+    pub ts_type: Option<&'static str>,
+    pub input_ts_type: Option<&'static str>,
     default: Option<fn() -> Value>,
 }
 
@@ -86,6 +102,8 @@ impl Field {
             max_length: None,
             relation: None,
             json: false,
+            ts_type: None,
+            input_ts_type: None,
             default: None,
         }
     }
@@ -101,6 +119,8 @@ impl Field {
             max_length: None,
             relation: None,
             json: true,
+            ts_type: None,
+            input_ts_type: None,
             default: None,
         }
     }
@@ -120,6 +140,8 @@ impl Field {
             max_length: None,
             relation: Some(relation),
             json: false,
+            ts_type: None,
+            input_ts_type: None,
             default: None,
         }
     }
@@ -152,6 +174,16 @@ impl Field {
 
     pub const fn max_length(mut self, max_length: u32) -> Self {
         self.max_length = Some(max_length);
+        self
+    }
+
+    pub const fn ts_type(mut self, ts_type: &'static str) -> Self {
+        self.ts_type = Some(ts_type);
+        self
+    }
+
+    pub const fn input_ts_type(mut self, ts_type: &'static str) -> Self {
+        self.input_ts_type = Some(ts_type);
         self
     }
 
@@ -239,6 +271,10 @@ impl<M: Model> ModelSerializer<M> {
         serialize_model_async(db, model, self.fields).await
     }
 
+    pub fn cache_values(&self, value: Value) -> Result<Vec<(&'static str, SqliteValue)>> {
+        cache_values::<M>(value, self.fields)
+    }
+
     pub fn validate_json(&self, value: Value) -> Result<Map<String, Value>> {
         validate_object::<M>(value, self.fields)
     }
@@ -268,6 +304,245 @@ impl<M: Model> ModelSerializer<M> {
     }
 }
 
+pub async fn upsert_normalized_model<M>(
+    db: &SqliteBackend,
+    serializer: ModelSerializer<M>,
+    value: Value,
+) -> che_orm::Result<()>
+where
+    M: Model + SqliteModel<Id = i64>,
+{
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+
+    for field in serializer.fields() {
+        if let Some(relation) = field.relation {
+            if let Some(nested) = object.get(field.name).and_then(Value::as_object) {
+                relation
+                    .cache_json(db, Value::Object(nested.clone()))
+                    .await?;
+            }
+        }
+    }
+
+    let merged_object = merge_with_existing::<M>(db, serializer, object).await?;
+    let values = match serializer.cache_values(Value::Object(merged_object)) {
+        Ok(values) => values,
+        Err(_) => return Ok(()),
+    };
+    if values.is_empty() {
+        return Ok(());
+    }
+
+    upsert_values::<M>(db, values).await
+}
+
+async fn merge_with_existing<M>(
+    db: &SqliteBackend,
+    serializer: ModelSerializer<M>,
+    object: &Map<String, Value>,
+) -> che_orm::Result<Map<String, Value>>
+where
+    M: Model + SqliteModel<Id = i64>,
+{
+    let mut merged = object.clone();
+    let Some(id) = merged.get("id").and_then(Value::as_i64) else {
+        return Ok(merged);
+    };
+
+    if let Ok(existing) = M::objects(db).get(id).await {
+        let existing = serializer.to_json_async(db, &existing).await?;
+        if let Some(existing_object) = existing.as_object() {
+            for (key, value) in existing_object {
+                merged.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+
+    Ok(merged)
+}
+
+fn cache_values<M: Model>(
+    value: Value,
+    fields: &[Field],
+) -> Result<Vec<(&'static str, SqliteValue)>> {
+    let object = value.as_object().ok_or(SerializerError::ExpectedObject)?;
+    let mut values = Vec::new();
+
+    for field in fields {
+        if field.write_only || field.relation.is_some() {
+            continue;
+        }
+
+        let Some(model_field) = find_model_field(M::fields(), field.source)
+            .or_else(|| find_model_field(M::fields(), field.name))
+        else {
+            continue;
+        };
+
+        let raw_value = lookup_remote_value(object, field.source)
+            .or_else(|| lookup_remote_value(object, field.name));
+
+        let value = match raw_value {
+            Some(Value::Null) | None if field.nullable || model_field.nullable => SqliteValue::Null,
+            Some(Value::Null) | None => {
+                if let Some(default) = field.default {
+                    sqlite_value_from_json(model_field, default())?
+                } else {
+                    return Err(SerializerError::MissingField(field.name.to_string()));
+                }
+            }
+            Some(value) if field.json => SqliteValue::String(value.to_string()),
+            Some(Value::Object(object)) if model_field.ty == FieldType::Integer => {
+                sqlite_value_from_object(object).ok_or_else(|| SerializerError::InvalidType {
+                    field: field.name.to_string(),
+                    expected: "integer",
+                })?
+            }
+            Some(Value::Object(object)) if model_field.ty == FieldType::Text => {
+                SqliteValue::String(
+                    coerce_text_value(&object)
+                        .unwrap_or_else(|| Value::Object(object.clone()).to_string()),
+                )
+            }
+            Some(value) => sqlite_value_from_json(model_field, value.clone())?,
+        };
+
+        values.push((model_field.db_name, value));
+    }
+
+    Ok(values)
+}
+
+async fn upsert_values<M>(
+    db: &SqliteBackend,
+    values: Vec<(&'static str, SqliteValue)>,
+) -> che_orm::Result<()>
+where
+    M: Model + SqliteModel<Id = i64>,
+{
+    let pk = M::primary_key().ok_or(che_orm::Error::MissingPrimaryKey)?;
+    let columns = values.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+    let placeholders = (1..=columns.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let updates = columns
+        .iter()
+        .copied()
+        .filter(|name| *name != pk.db_name)
+        .map(|name| format!("{name} = excluded.{name}"))
+        .collect::<Vec<_>>();
+    let conflict_clause = if updates.is_empty() {
+        "ON CONFLICT DO NOTHING".to_string()
+    } else {
+        format!(
+            "ON CONFLICT({}) DO UPDATE SET {}",
+            pk.db_name,
+            updates.join(", ")
+        )
+    };
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({}) {}",
+        M::table_name(),
+        columns.join(", "),
+        placeholders,
+        conflict_clause,
+    );
+    let query = values.into_iter().fold(
+        che_orm::__private::sqlx::query(&sql),
+        |query, (_, value)| match value {
+            SqliteValue::I64(value) => query.bind(value),
+            SqliteValue::String(value) => query.bind(value),
+            SqliteValue::Bool(value) => query.bind(value),
+            SqliteValue::F64(value) => query.bind(value),
+            SqliteValue::Null => query.bind(Option::<i64>::None),
+        },
+    );
+    query.execute(db.pool()).await?;
+    Ok(())
+}
+
+fn sqlite_value_from_json(field: &FieldInfo, value: Value) -> Result<SqliteValue> {
+    if value.is_null() {
+        return Ok(SqliteValue::Null);
+    }
+
+    match field.ty {
+        FieldType::Integer => value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .map(SqliteValue::from)
+            .or_else(|| match value {
+                Value::Object(object) => sqlite_value_from_object(&object),
+                _ => None,
+            })
+            .ok_or_else(|| SerializerError::InvalidType {
+                field: field.rust_name.to_string(),
+                expected: "integer",
+            }),
+        FieldType::Text => match value {
+            Value::String(text) => Ok(SqliteValue::from(text)),
+            Value::Object(object) => Ok(SqliteValue::String(
+                coerce_text_value(&object)
+                    .unwrap_or_else(|| Value::Object(object.clone()).to_string()),
+            )),
+            _ => Err(SerializerError::InvalidType {
+                field: field.rust_name.to_string(),
+                expected: "string",
+            }),
+        },
+        FieldType::Boolean => {
+            value
+                .as_bool()
+                .map(SqliteValue::from)
+                .ok_or_else(|| SerializerError::InvalidType {
+                    field: field.rust_name.to_string(),
+                    expected: "boolean",
+                })
+        }
+        FieldType::Real => {
+            value
+                .as_f64()
+                .map(SqliteValue::from)
+                .ok_or_else(|| SerializerError::InvalidType {
+                    field: field.rust_name.to_string(),
+                    expected: "number",
+                })
+        }
+    }
+}
+
+fn coerce_text_value(object: &Map<String, Value>) -> Option<String> {
+    for key in ["name", "short_name", "title", "label", "value"] {
+        if let Some(text) = object.get(key).and_then(Value::as_str) {
+            return Some(text.to_string());
+        }
+    }
+
+    object
+        .get("id")
+        .and_then(|value| value.as_i64().map(|value| value.to_string()))
+        .or_else(|| {
+            object
+                .get("id")
+                .and_then(|value| value.as_u64().map(|value| value.to_string()))
+        })
+}
+
+fn sqlite_value_from_object(object: &Map<String, Value>) -> Option<SqliteValue> {
+    object
+        .get("id")
+        .and_then(|value| value.as_i64().map(SqliteValue::from))
+        .or_else(|| {
+            object
+                .get("id")
+                .and_then(|value| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+                .map(SqliteValue::from)
+        })
+}
+
 pub fn normalize_remote_object<M: Model>(value: Value, fields: &[Field]) -> Value {
     let Some(remote) = value.as_object() else {
         return value;
@@ -283,7 +558,9 @@ pub fn normalize_remote_object<M: Model>(value: Value, fields: &[Field]) -> Valu
         let raw_value = lookup_remote_value(remote, field.source)
             .or_else(|| lookup_remote_value(remote, field.name));
         let value = if field.json {
-            raw_value.cloned().unwrap_or_else(|| default_remote_value::<M>(field))
+            raw_value
+                .cloned()
+                .unwrap_or_else(|| default_remote_value::<M>(field))
         } else if field.relation.is_some() {
             match raw_value {
                 Some(Value::Object(_)) => raw_value.cloned().unwrap_or(Value::Null),
@@ -316,6 +593,9 @@ fn normalize_remote_field_value<M: Model>(field: &Field, value: Option<&Value>) 
         Some(Value::Object(object)) if field.name.ends_with("_id") => {
             object.get("id").cloned().unwrap_or(Value::Null)
         }
+        Some(Value::Object(object)) => coerce_text_value(object)
+            .map(Value::String)
+            .unwrap_or_else(|| Value::Object(object.clone())),
         Some(value) if !value.is_null() => value.clone(),
         _ => default_remote_value::<M>(field),
     }
@@ -326,9 +606,9 @@ fn default_remote_value<M: Model>(field: &Field) -> Value {
         return default();
     }
 
-    let model_field = M::fields()
-        .iter()
-        .find(|model_field| model_field.db_name == field.name || model_field.rust_name == field.name);
+    let model_field = M::fields().iter().find(|model_field| {
+        model_field.db_name == field.name || model_field.rust_name == field.name
+    });
 
     match model_field {
         Some(model_field) if model_field.nullable || field.nullable => Value::Null,

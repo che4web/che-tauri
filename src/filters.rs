@@ -320,7 +320,8 @@ impl Filter {
 }
 
 fn json_item_matches_filter(item: &Value, filter: &Filter, expected: &str) -> bool {
-    let Some(value) = json_lookup(item, filter.name).or_else(|| json_lookup(item, filter.source)) else {
+    let Some(value) = json_lookup(item, filter.name).or_else(|| json_lookup(item, filter.source))
+    else {
         return false;
     };
 

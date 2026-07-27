@@ -200,7 +200,7 @@ fn models_ts(endpoints: &[ApiEndpoint]) -> String {
                 "  {}{}: {};\n",
                 field.name,
                 optional_marker(field),
-                ts_type(field.ty, field.nullable)
+                field_ts_type(field)
             ));
         }
         out.push_str("}\n\n");
@@ -210,11 +210,7 @@ fn models_ts(endpoints: &[ApiEndpoint]) -> String {
             endpoint.model_name
         ));
         for field in endpoint.fields.iter().filter(|field| !field.read_only) {
-            out.push_str(&format!(
-                "  {}?: {};\n",
-                field.name,
-                ts_type(field.ty, field.nullable)
-            ));
+            out.push_str(&format!("  {}?: {};\n", field.name, field_ts_type(field)));
         }
         out.push_str("}\n\n");
 
@@ -289,10 +285,56 @@ fn ts_type(ty: FieldType, nullable: bool) -> String {
 }
 
 fn response_ts_type(field: &ApiField) -> String {
+    if let Some(ts_type) = &field.ts_type {
+        return maybe_nullable(ts_type.clone(), field.nullable);
+    }
+
     match &field.related_model {
         Some(model) if field.nullable => format!("{model} | null"),
         Some(model) => model.clone(),
-        None => ts_type(field.ty, field.nullable),
+        None if field.ty == FieldType::Text && field.nullable => "string | null".to_string(),
+        None if field.ty == FieldType::Text => "string".to_string(),
+        None if field.ty == FieldType::Integer && field.nullable => "number | null".to_string(),
+        None if field.ty == FieldType::Integer => "number".to_string(),
+        None if field.ty == FieldType::Real && field.nullable => "number | null".to_string(),
+        None if field.ty == FieldType::Real => "number".to_string(),
+        None if field.ty == FieldType::Boolean && field.nullable => "boolean | null".to_string(),
+        None if field.ty == FieldType::Boolean => "boolean".to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+fn field_ts_type(field: &ApiField) -> String {
+    if let Some(ts_type) = &field.input_ts_type {
+        return maybe_nullable(ts_type.clone(), field.nullable);
+    }
+
+    if let Some(ts_type) = &field.ts_type {
+        return maybe_nullable(ts_type.clone(), field.nullable);
+    }
+
+    if field.related_model.is_some() {
+        return if field.nullable {
+            "unknown | null".to_string()
+        } else {
+            "unknown".to_string()
+        };
+    }
+
+    match field.ty {
+        FieldType::Text => maybe_nullable("string".to_string(), field.nullable),
+        FieldType::Integer | FieldType::Real => {
+            maybe_nullable("number".to_string(), field.nullable)
+        }
+        FieldType::Boolean => maybe_nullable("boolean".to_string(), field.nullable),
+    }
+}
+
+fn maybe_nullable(base: String, nullable: bool) -> String {
+    if nullable {
+        format!("{base} | null")
+    } else {
+        base
     }
 }
 
