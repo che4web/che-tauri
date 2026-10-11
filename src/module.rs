@@ -1,10 +1,15 @@
-use che_orm::{FieldType, Model, ModelSchema, SqliteModel, create_table_sql};
+use che_orm::{ColumnType, Model, SchemaSet, SqlCompiler, SqliteDialect, TableSchema};
+use serde::Serialize;
 
 use crate::{FilterSet, ModelSerializer, api::ResourceRegistration};
 
 pub trait AppModule {
     fn name(&self) -> &'static str;
     fn init(&self, ctx: &mut ModuleContext);
+
+    fn migrations(&self) -> Vec<che_orm::Migration> {
+        Vec::new()
+    }
 }
 
 #[derive(Default)]
@@ -41,7 +46,7 @@ impl InstalledApps {
 #[derive(Default)]
 pub struct ModuleContext {
     sql: Vec<String>,
-    schemas: Vec<ModelSchema>,
+    schemas: SchemaSet,
     api_endpoints: Vec<ApiEndpoint>,
     resources: Vec<ResourceRegistration>,
 }
@@ -58,7 +63,7 @@ pub struct ApiEndpoint {
 pub struct ApiField {
     pub name: String,
     pub source: String,
-    pub ty: FieldType,
+    pub ty: ColumnType,
     pub related_model: Option<String>,
     pub ts_type: Option<String>,
     pub input_ts_type: Option<String>,
@@ -73,7 +78,7 @@ pub struct ApiField {
 pub struct ApiFilter {
     pub name: String,
     pub source: String,
-    pub ty: FieldType,
+    pub ty: ColumnType,
     pub nullable: bool,
 }
 
@@ -86,8 +91,19 @@ impl ModuleContext {
     where
         M: Model,
     {
-        self.sql.push(create_table_sql::<M>());
-        self.schemas.push(ModelSchema::from_model::<M>());
+        let compiled = SqlCompiler::<SqliteDialect>::compile_schema(&M::schema());
+        self.sql.push(
+            compiled
+                .table
+                .replacen("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1),
+        );
+        self.sql.extend(
+            compiled
+                .indexes
+                .into_iter()
+                .map(|sql| sql.replacen("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)),
+        );
+        self.schemas = std::mem::take(&mut self.schemas).model::<M>();
     }
 
     pub fn create_table<M>(&mut self)
@@ -103,7 +119,7 @@ impl ModuleContext {
         serializer: ModelSerializer<M>,
         filterset: FilterSet<M>,
     ) where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         self.model::<M>();
         let registration = ResourceRegistration::from_model::<M>(resource, serializer, filterset);
@@ -123,7 +139,7 @@ impl ModuleContext {
         serializer: ModelSerializer<M>,
         filterset: FilterSet<M>,
     ) where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         self.mapped_remote_resource(resource, remote_path, serializer, filterset);
     }
@@ -135,7 +151,7 @@ impl ModuleContext {
         serializer: ModelSerializer<M>,
         filterset: FilterSet<M>,
     ) where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         let registration = ResourceRegistration::from_remote_model::<M>(
             resource,
@@ -159,7 +175,7 @@ impl ModuleContext {
         serializer: ModelSerializer<M>,
         filterset: FilterSet<M>,
     ) where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         let registration = ResourceRegistration::from_mapped_remote_model::<M>(
             resource,
@@ -183,7 +199,7 @@ impl ModuleContext {
         serializer: ModelSerializer<M>,
         filterset: FilterSet<M>,
     ) where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         let registration = ResourceRegistration::from_cached_mapped_remote_model::<M>(
             resource,
@@ -201,7 +217,11 @@ impl ModuleContext {
         self.resources.push(registration);
     }
 
-    pub fn model_schemas(&self) -> &[ModelSchema] {
+    pub fn model_schemas(&self) -> &[TableSchema] {
+        self.schemas.tables()
+    }
+
+    pub fn schema(&self) -> &SchemaSet {
         &self.schemas
     }
 

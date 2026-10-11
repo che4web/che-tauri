@@ -1,6 +1,9 @@
 use std::{fs, path::PathBuf};
 
-use che_orm::{FieldType, Schema, SqliteBackend, diff_schemas, sqlite_migration_sql};
+use che_orm::{
+    ColumnType, Migration, MigrationGraph, MigrationId, ProjectState, operations_from_changes,
+    render_migration_rust,
+};
 use clap::{Parser, Subcommand};
 
 use crate::{ApiEndpoint, ApiField, AppConfig, InstalledApps, ModuleContext};
@@ -88,35 +91,78 @@ impl Management {
 
     fn makemigrations(&self, app: &str, apps_dir: PathBuf, name: &str) -> ManageResult<()> {
         validate_app_name(app)?;
-        let module = self
-            .apps
+        self.apps
             .find(app)
             .ok_or_else(|| format!("app is not installed: {app}"))?;
 
         let migrations_dir = app_migrations_dir(&apps_dir, app);
         fs::create_dir_all(&migrations_dir)?;
 
-        let snapshot_path = migrations_dir.join("schema.json");
-        let old_schema = Schema::load_or_empty(&snapshot_path)?;
-        let new_schema = app_schema(module);
-        let migration = diff_schemas(&old_schema, &new_schema);
+        let graph = MigrationGraph::new(
+            self.apps
+                .iter()
+                .flat_map(|module| module.migrations())
+                .collect(),
+        )?;
+        graph.validate_heads()?;
+        for path in migration_files(&migrations_dir)? {
+            let name = path.file_stem().unwrap().to_string_lossy();
+            if !graph
+                .ordered()
+                .any(|migration| migration.id.app == app && migration.id.name == name)
+            {
+                return Err(format!("migration {app}:{name} is not registered; register AppModule::migrations() and rebuild manage").into());
+            }
+        }
+        let old_state = graph.replay(ProjectState::default())?;
+        let schemas = self
+            .apps
+            .iter()
+            .map(|module| (module.name(), app_schema(module)))
+            .collect::<Vec<_>>();
+        let mut desired =
+            ProjectState::from_app_schemas(schemas.iter().map(|(name, schema)| (*name, schema)))?;
+        for object in old_state.objects() {
+            desired.add_schema_object(object.clone())?;
+        }
+        let changes = old_state
+            .diff(&desired)?
+            .into_iter()
+            .filter(|change| change.app() == app)
+            .collect::<Vec<_>>();
 
-        if migration.changes.is_empty() {
+        if changes.is_empty() {
             println!("No schema changes detected for app {app}");
             return Ok(());
         }
 
-        let sql = sqlite_migration_sql(&migration);
         let file_name = format!(
-            "{:04}_{}.sql",
+            "{:04}_{}",
             next_migration_number(&migrations_dir)?,
             slugify(name)
         );
-        let migration_path = migrations_dir.join(file_name);
-        fs::write(&migration_path, format!("{sql}\n"))?;
-        new_schema.save(snapshot_path)?;
+        let dependencies = self
+            .apps
+            .names()
+            .flat_map(|app| graph.app_heads(app))
+            .map(|migration| migration.id.clone())
+            .collect();
+        let migration = Migration::new(
+            MigrationId {
+                app: app.to_string(),
+                name: file_name.clone(),
+            },
+            dependencies,
+            operations_from_changes(changes),
+        );
+        let migration_path = migrations_dir.join(format!("{file_name}.rs"));
+        fs::write(&migration_path, render_migration_rust(&migration))?;
+        update_migrations_mod(&migrations_dir)?;
 
         println!("Created {}", migration_path.display());
+        println!(
+            "Register migrations::migrations() in AppModule::migrations() and rebuild manage before the next command."
+        );
 
         Ok(())
     }
@@ -132,23 +178,52 @@ impl Management {
             Some(database_url) => database_url,
             None => AppConfig::from_file(config)?.database.url,
         };
-        let db = SqliteBackend::connect(&database_url).await?;
+        let db = crate::state::connect_database(&database_url).await?;
 
-        match app {
-            Some(app) => {
-                validate_app_name(app)?;
-                if self.apps.find(app).is_none() {
-                    return Err(format!("app is not installed: {app}").into());
-                }
-                apply_app_migrations(&db, &apps_dir, app).await?;
-            }
-            None => {
-                for app in self.apps.names() {
-                    apply_app_migrations(&db, &apps_dir, app).await?;
-                }
+        if let Some(app) = app {
+            validate_app_name(app)?;
+            if self.apps.find(app).is_none() {
+                return Err(format!("app is not installed: {app}").into());
             }
         }
 
+        let migrations = self
+            .apps
+            .iter()
+            .flat_map(|module| module.migrations())
+            .collect::<Vec<_>>();
+        let graph = MigrationGraph::new(migrations)?;
+        graph.validate_heads()?;
+        for module in self
+            .apps
+            .iter()
+            .filter(|module| app.is_none_or(|app| app == module.name()))
+        {
+            for path in migration_files(&app_migrations_dir(&apps_dir, module.name()))? {
+                let name = path.file_stem().unwrap().to_string_lossy();
+                if !graph
+                    .ordered()
+                    .any(|migration| migration.id.app == module.name() && migration.id.name == name)
+                {
+                    return Err(format!(
+                        "migration {}:{name} is not registered; rebuild manage",
+                        module.name()
+                    )
+                    .into());
+                }
+            }
+        }
+        let target = app.and_then(|app| {
+            graph
+                .app_heads(app)
+                .first()
+                .map(|migration| migration.id.clone())
+        });
+        if app.is_some() && target.is_none() {
+            return Ok(());
+        }
+        let applied = db.migrate_to(graph, target).await?;
+        println!("Applied {applied} operation migrations");
         Ok(())
     }
 
@@ -175,10 +250,10 @@ impl Management {
     }
 }
 
-fn app_schema(module: &dyn crate::AppModule) -> Schema {
+fn app_schema(module: &dyn crate::AppModule) -> che_orm::SchemaSet {
     let mut ctx = ModuleContext::new();
     module.init(&mut ctx);
-    Schema::from_models(ctx.model_schemas().to_vec())
+    ctx.schema().clone()
 }
 
 fn models_ts(endpoints: &[ApiEndpoint]) -> String {
@@ -271,11 +346,12 @@ fn optional_marker(field: &ApiField) -> &'static str {
     }
 }
 
-fn ts_type(ty: FieldType, nullable: bool) -> String {
+fn ts_type(ty: ColumnType, nullable: bool) -> String {
     let base = match ty {
-        FieldType::Integer | FieldType::Real => "number",
-        FieldType::Text => "string",
-        FieldType::Boolean => "boolean",
+        ColumnType::Integer | ColumnType::Real => "number",
+        ColumnType::Text | ColumnType::DateTime | ColumnType::Uuid => "string",
+        ColumnType::Boolean => "boolean",
+        ColumnType::Binary => "number[]",
     };
     if nullable {
         format!("{base} | null")
@@ -292,15 +368,7 @@ fn response_ts_type(field: &ApiField) -> String {
     match &field.related_model {
         Some(model) if field.nullable => format!("{model} | null"),
         Some(model) => model.clone(),
-        None if field.ty == FieldType::Text && field.nullable => "string | null".to_string(),
-        None if field.ty == FieldType::Text => "string".to_string(),
-        None if field.ty == FieldType::Integer && field.nullable => "number | null".to_string(),
-        None if field.ty == FieldType::Integer => "number".to_string(),
-        None if field.ty == FieldType::Real && field.nullable => "number | null".to_string(),
-        None if field.ty == FieldType::Real => "number".to_string(),
-        None if field.ty == FieldType::Boolean && field.nullable => "boolean | null".to_string(),
-        None if field.ty == FieldType::Boolean => "boolean".to_string(),
-        None => "unknown".to_string(),
+        None => ts_type(field.ty, field.nullable),
     }
 }
 
@@ -321,13 +389,7 @@ fn field_ts_type(field: &ApiField) -> String {
         };
     }
 
-    match field.ty {
-        FieldType::Text => maybe_nullable("string".to_string(), field.nullable),
-        FieldType::Integer | FieldType::Real => {
-            maybe_nullable("number".to_string(), field.nullable)
-        }
-        FieldType::Boolean => maybe_nullable("boolean".to_string(), field.nullable),
-    }
+    ts_type(field.ty, field.nullable)
 }
 
 fn maybe_nullable(base: String, nullable: bool) -> String {
@@ -436,21 +498,6 @@ function serializeListParams(params?: ListParams) {
 "#
 }
 
-async fn apply_app_migrations(
-    db: &SqliteBackend,
-    apps_dir: &std::path::Path,
-    app: &str,
-) -> ManageResult<()> {
-    let migrations_dir = app_migrations_dir(apps_dir, app);
-    for name in db
-        .apply_migrations_dir_with_namespace(app, &migrations_dir)
-        .await?
-    {
-        println!("Applied {app}: {name}");
-    }
-    Ok(())
-}
-
 fn startapp(name: &str, apps_dir: PathBuf) -> ManageResult<()> {
     validate_app_name(name)?;
 
@@ -464,6 +511,8 @@ fn startapp(name: &str, apps_dir: PathBuf) -> ManageResult<()> {
     fs::write(app_dir.join("models.rs"), models_template(name))?;
     fs::write(app_dir.join("serializers.rs"), serializers_template(name))?;
     fs::write(app_dir.join("filters.rs"), filters_template(name))?;
+    fs::create_dir(app_dir.join("migrations"))?;
+    update_migrations_mod(&app_dir.join("migrations"))?;
 
     update_apps_mod(&apps_dir, name)?;
 
@@ -503,7 +552,9 @@ fn migration_files(migrations_dir: &std::path::Path) -> ManageResult<Vec<PathBuf
     let mut files = Vec::new();
     for entry in fs::read_dir(migrations_dir)? {
         let path = entry?.path();
-        if path.extension().is_some_and(|extension| extension == "sql") {
+        if path.extension().is_some_and(|extension| extension == "rs")
+            && path.file_name().is_some_and(|name| name != "mod.rs")
+        {
             files.push(path);
         }
     }
@@ -517,6 +568,25 @@ fn next_migration_number(migrations_dir: &std::path::Path) -> ManageResult<u32> 
         .max()
         .unwrap_or(0);
     Ok(max + 1)
+}
+
+fn update_migrations_mod(dir: &std::path::Path) -> ManageResult<()> {
+    let mut files = migration_files(dir)?;
+    files.sort();
+    let mut source = String::new();
+    for (index, path) in files.iter().enumerate() {
+        source.push_str(&format!(
+            "#[path = {:?}]\nmod migration_{index};\n",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+    }
+    source.push_str("\npub fn migrations() -> Vec<che_orm::Migration> {\n    vec![\n");
+    for index in 0..files.len() {
+        source.push_str(&format!("        migration_{index}::migration(),\n"));
+    }
+    source.push_str("    ]\n}\n");
+    fs::write(dir.join("mod.rs"), source)?;
+    Ok(())
 }
 
 fn slugify(value: &str) -> String {
@@ -558,6 +628,7 @@ fn mod_template(name: &str) -> String {
     format!(
         r#"pub mod filters;
 pub mod models;
+pub mod migrations;
 pub mod serializers;
 
 use che_tauri::{{AppModule, ModuleContext}};
@@ -569,6 +640,10 @@ pub fn module() -> {module_type} {{
 pub struct {module_type};
 
 impl AppModule for {module_type} {{
+    fn migrations(&self) -> Vec<che_orm::Migration> {{
+        migrations::migrations()
+    }}
+
     fn name(&self) -> &'static str {{
         "{name}"
     }}
@@ -591,10 +666,10 @@ fn models_template(name: &str) -> String {
     format!(
         r#"use che_orm::Model;
 
-#[derive(Debug, Clone, Model)]
-#[model(table = "{name}")]
+#[derive(Debug, Clone, serde::Serialize, Model)]
+#[orm(table = "{name}")]
 pub struct {model} {{
-    #[field(primary_key)]
+    #[orm(primary_key)]
     pub id: i64,
 
     pub name: String,
@@ -674,4 +749,133 @@ fn camel_case(name: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AppModule, Field, FilterSet, ModelSerializer};
+    use che_orm::{Database, Model};
+
+    #[derive(Model, serde::Serialize)]
+    #[orm(table = "notes")]
+    struct Note {
+        #[orm(primary_key)]
+        id: i64,
+        title: String,
+        data: Vec<u8>,
+        #[serde(with = "che_orm::time::serde::rfc3339")]
+        created_at: che_orm::time::OffsetDateTime,
+    }
+
+    struct Notes {
+        compiled: bool,
+    }
+    impl AppModule for Notes {
+        fn name(&self) -> &'static str {
+            "notes"
+        }
+        fn init(&self, ctx: &mut ModuleContext) {
+            static FIELDS: &[Field] = &[
+                Field::new("id").read_only(),
+                Field::new("title"),
+                Field::new("data"),
+                Field::new("created_at"),
+            ];
+            ctx.resource::<Note>("notes", ModelSerializer::new(FIELDS), FilterSet::new(&[]));
+        }
+        fn migrations(&self) -> Vec<Migration> {
+            if !self.compiled {
+                return Vec::new();
+            }
+            let desired = ProjectState::from_app_schema("notes", &app_schema(self));
+            vec![Migration::new(
+                MigrationId {
+                    app: "notes".into(),
+                    name: "0001_auto".into(),
+                },
+                vec![],
+                operations_from_changes(ProjectState::default().diff(&desired).unwrap()),
+            )]
+        }
+    }
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "che-tauri-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_migrations_generate_register_and_apply_once() {
+        let temp = TempDir::new();
+        let apps_dir = temp.0.join("apps");
+        let uncompiled = Management::new(InstalledApps::new().add(Notes { compiled: false }));
+        uncompiled
+            .makemigrations("notes", apps_dir.clone(), "auto")
+            .unwrap();
+        let source = fs::read_to_string(apps_dir.join("notes/migrations/0001_auto.rs")).unwrap();
+        assert!(source.contains("MigrationOperation::CreateModel"));
+        assert!(
+            uncompiled
+                .makemigrations("notes", apps_dir.clone(), "auto")
+                .unwrap_err()
+                .to_string()
+                .contains("not registered")
+        );
+
+        let compiled = Management::new(InstalledApps::new().add(Notes { compiled: true }));
+        compiled
+            .makemigrations("notes", apps_dir.clone(), "auto")
+            .unwrap();
+        let db_path = temp.0.join("db.sqlite");
+        for _ in 0..2 {
+            compiled
+                .migrate(
+                    Some("notes"),
+                    apps_dir.clone(),
+                    temp.0.join("unused.toml"),
+                    Some(format!("sqlite://{}?mode=rwc", db_path.display())),
+                )
+                .await
+                .unwrap();
+        }
+        let db = Database::connect(db_path.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        assert_eq!(db.count::<Note>().await.unwrap(), 0);
+        let models = models_ts(&compiled.api_endpoints());
+        assert!(models.contains("data: number[];"));
+        assert!(models.contains("created_at: string;"));
+    }
+
+    #[test]
+    fn startapp_uses_current_model_attributes_and_registers_migrations() {
+        let temp = TempDir::new();
+        startapp("users", temp.0.clone()).unwrap();
+        let model = fs::read_to_string(temp.0.join("users/models.rs")).unwrap();
+        assert!(model.contains("serde::Serialize"));
+        assert!(model.contains("#[orm(table = \"users\")]"));
+        assert!(model.contains("#[orm(primary_key)]"));
+        assert!(
+            fs::read_to_string(temp.0.join("users/mod.rs"))
+                .unwrap()
+                .contains("migrations::migrations()")
+        );
+    }
 }

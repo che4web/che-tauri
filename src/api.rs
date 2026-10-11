@@ -1,7 +1,9 @@
 use std::{collections::HashMap, marker::PhantomData, time::Duration};
 
 use async_trait::async_trait;
-use che_orm::SqliteModel;
+use che_orm::{
+    Assignment, ColumnRef, InsertAst, InsertValue, Model, QueryAst, TableRef, UpdateAst,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -85,7 +87,7 @@ pub struct CachedMappedRemoteInvokeSet<M> {
 
 impl<M> ModelInvokeSet<M>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     pub fn new(
         resource: &'static str,
@@ -103,7 +105,7 @@ where
 
 impl<M> RawRemoteInvokeSet<M>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     pub fn new(resource: &'static str, remote_path: &'static str) -> Self {
         Self {
@@ -116,7 +118,7 @@ where
 
 impl<M> MappedRemoteInvokeSet<M>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     pub fn new(
         resource: &'static str,
@@ -136,7 +138,7 @@ where
 
 impl<M> CachedMappedRemoteInvokeSet<M>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     pub fn new(
         resource: &'static str,
@@ -157,68 +159,91 @@ where
 #[async_trait]
 impl<M> InvokeResource for ModelInvokeSet<M>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     fn resource(&self) -> &'static str {
         self.resource
     }
 
     async fn list(&self, state: &AppState, params: HashMap<String, String>) -> ApiResult<Value> {
-        let count_params = params
-            .iter()
-            .filter(|(key, _)| !matches!(key.as_str(), "limit" | "offset" | "ordering"))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<HashMap<_, _>>();
-        let count = self
-            .filterset
-            .apply(M::objects(state.db()).query(), &count_params)?
-            .count()
-            .await?;
-        let query = self
-            .filterset
-            .apply(M::objects(state.db()).query(), &params)?;
-        let models = query.all().await?;
-        let mut results = Vec::with_capacity(models.len());
-        for model in &models {
-            results.push(self.serializer.to_json_async(state.db(), model).await?);
-        }
-
-        Ok(json!({
-            "count": count,
-            "results": results,
-        }))
+        local_list(state, &self.serializer, &self.filterset, &params).await
     }
 
     async fn retrieve(&self, state: &AppState, id: i64) -> ApiResult<Value> {
-        let model = M::objects(state.db()).get(id).await?;
+        let model = state
+            .db()
+            .get::<M>(crate::database::primary_key::<M>(id)?)
+            .await?
+            .ok_or_else(|| ApiError::not_found("model not found"))?;
         Ok(self.serializer.to_json_async(state.db(), &model).await?)
     }
 
     async fn create(&self, state: &AppState, payload: Value) -> ApiResult<Value> {
-        let mut create = M::objects(state.db()).create();
-
-        for (field, value) in self.serializer.create_values(payload)? {
-            create = create.set(field, value);
-        }
-
-        let model = create.execute().await?;
+        let values = self
+            .serializer
+            .create_values(payload)?
+            .into_iter()
+            .map(|(field, value)| InsertValue {
+                column: ColumnRef::new(M::table_name(), field),
+                value,
+            })
+            .collect();
+        let model = crate::database::write_model::<M>(
+            state.db(),
+            QueryAst::Insert(InsertAst {
+                table: TableRef::new(M::table_name()),
+                values,
+                returning: M::columns()
+                    .iter()
+                    .map(|name| ColumnRef::new(M::table_name(), name))
+                    .collect(),
+            }),
+        )
+        .await?
+        .ok_or_else(|| ApiError::internal("insert did not return a row"))?;
         Ok(self.serializer.to_json_async(state.db(), &model).await?)
     }
 
     async fn update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
-        let mut update = M::objects(state.db()).update_fields(id);
-
-        for (field, value) in self.serializer.update_values(payload)? {
-            update = update.set(field, value);
+        let mut assignments = self
+            .serializer
+            .update_values(payload)?
+            .into_iter()
+            .map(|(field, value)| Assignment {
+                column: ColumnRef::new(M::table_name(), field),
+                value,
+            })
+            .collect::<Vec<_>>();
+        if assignments.is_empty() {
+            return Err(ApiError::bad_request("empty update"));
         }
-
-        let model = update.execute().await?;
+        assignments.extend(M::managed_update_values());
+        let model = crate::database::write_model::<M>(
+            state.db(),
+            QueryAst::Update(UpdateAst {
+                table: TableRef::new(M::table_name()),
+                assignments,
+                filter: Some(M::primary_key().eq(crate::database::primary_key::<M>(id)?)),
+                returning: M::columns()
+                    .iter()
+                    .map(|name| ColumnRef::new(M::table_name(), name))
+                    .collect(),
+                allow_all: false,
+            }),
+        )
+        .await?
+        .ok_or_else(|| ApiError::not_found("model not found"))?;
         Ok(self.serializer.to_json_async(state.db(), &model).await?)
     }
 
     async fn delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
-        M::objects(state.db()).get(id).await?;
-        M::objects(state.db()).delete(id).await?;
+        if !state
+            .db()
+            .delete::<M>(crate::database::primary_key::<M>(id)?)
+            .await?
+        {
+            return Err(ApiError::not_found("model not found"));
+        }
         Ok(json!({ "deleted": true }))
     }
 }
@@ -226,7 +251,7 @@ where
 #[async_trait]
 impl<M> InvokeResource for RawRemoteInvokeSet<M>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     fn resource(&self) -> &'static str {
         self.resource
@@ -305,7 +330,7 @@ where
 #[async_trait]
 impl<M> InvokeResource for MappedRemoteInvokeSet<M>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     fn resource(&self) -> &'static str {
         self.resource
@@ -389,7 +414,7 @@ where
 #[async_trait]
 impl<M> InvokeResource for CachedMappedRemoteInvokeSet<M>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     fn resource(&self) -> &'static str {
         self.resource
@@ -496,7 +521,10 @@ where
         .await?;
 
         if response.status().is_success() {
-            M::objects(state.db()).delete(id).await?;
+            state
+                .db()
+                .delete::<M>(crate::database::primary_key::<M>(id)?)
+                .await?;
             Ok(json!({ "deleted": true }))
         } else {
             remote_error(response).await
@@ -571,7 +599,7 @@ impl ResourceRegistration {
         filterset: FilterSet<M>,
     ) -> Self
     where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         Self {
             resource,
@@ -590,7 +618,7 @@ impl ResourceRegistration {
         filterset: FilterSet<M>,
     ) -> Self
     where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         Self {
             resource,
@@ -610,7 +638,7 @@ impl ResourceRegistration {
         filterset: FilterSet<M>,
     ) -> Self
     where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         Self {
             resource,
@@ -632,7 +660,7 @@ impl ResourceRegistration {
         filterset: FilterSet<M>,
     ) -> Self
     where
-        M: SqliteModel<Id = i64>,
+        M: Model + Serialize + Send + Sync + 'static,
     {
         Self {
             resource,
@@ -652,19 +680,23 @@ async fn local_list<M>(
     params: &HashMap<String, String>,
 ) -> ApiResult<Value>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     let count_params = params
         .iter()
         .filter(|(key, _)| !matches!(key.as_str(), "limit" | "offset" | "ordering"))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<HashMap<_, _>>();
-    let count = filterset
-        .apply(M::objects(state.db()).query(), &count_params)?
-        .count()
+    let count = state
+        .db()
+        .count_query(filterset.apply(M::query(), &count_params)?)
         .await?;
-    let query = filterset.apply(M::objects(state.db()).query(), params)?;
-    let models = query.all().await?;
+    let mut query = filterset.apply(M::query(), params)?;
+    // SQLite requires LIMIT when OFFSET is used on its own.
+    if params.contains_key("offset") && !params.contains_key("limit") {
+        query = query.limit(i64::MAX as u64);
+    }
+    let models = state.db().fetch_all(query).await?;
     let mut results = Vec::with_capacity(models.len());
     for model in &models {
         results.push(serializer.to_json_async(state.db(), model).await?);
@@ -682,16 +714,15 @@ async fn local_retrieve<M>(
     id: i64,
 ) -> ApiResult<Option<Value>>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
-    match M::objects(state.db()).get(id).await {
-        Ok(model) => Ok(Some(serializer.to_json_async(state.db(), &model).await?)),
-        Err(che_orm::Error::Database(sqlx_error))
-            if matches!(sqlx_error, che_orm::__private::sqlx::Error::RowNotFound) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(ApiError::new("database_error", error.to_string())),
+    match state
+        .db()
+        .get::<M>(crate::database::primary_key::<M>(id)?)
+        .await?
+    {
+        Some(model) => Ok(Some(serializer.to_json_async(state.db(), &model).await?)),
+        None => Ok(None),
     }
 }
 
@@ -701,7 +732,7 @@ async fn cache_normalized_list<M>(
     value: &Value,
 ) -> ApiResult<()>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model + Serialize + Send + Sync + 'static,
 {
     let Some(results) = value.get("results").and_then(Value::as_array) else {
         return Ok(());
@@ -781,9 +812,15 @@ impl TauriApi {
     }
 
     pub async fn initialize(&self) -> ApiResult<()> {
-        for sql in &self.sql {
-            self.state.db().apply_sql(sql).await?;
-        }
+        let sql = self
+            .sql
+            .iter()
+            .map(|sql| format!("{sql};\n"))
+            .collect::<String>();
+        self.state
+            .db()
+            .raw_transaction(move |connection| connection.execute_batch(&sql))
+            .await?;
         Ok(())
     }
 
@@ -914,27 +951,31 @@ async fn remote_error(response: reqwest::Response) -> ApiResult<Value> {
 
 fn api_fields<M>(fields: &[Field]) -> Vec<crate::ApiField>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model,
 {
     fields
         .iter()
         .filter_map(|field| {
-            let model_field = M::fields().iter().find(|model_field| {
-                model_field.db_name == field.source
-                    || model_field.rust_name == field.source
-                    || model_field.db_name == field.name
-                    || model_field.rust_name == field.name
+            let schema = M::schema();
+            let model_field = schema.columns.iter().find(|model_field| {
+                model_field.name == field.source
+                    || model_field.field_name == field.source
+                    || model_field.name == field.name
+                    || model_field.field_name == field.name
             })?;
             Some(crate::ApiField {
                 name: field.name.to_string(),
                 source: field.source.to_string(),
-                ty: model_field.ty,
+                ty: model_field.column_type,
                 related_model: field
                     .relation
                     .map(|relation| relation.model_name().to_string()),
                 ts_type: field.ts_type.map(ToString::to_string),
                 input_ts_type: field.input_ts_type.map(ToString::to_string),
-                read_only: field.read_only,
+                read_only: field.read_only
+                    || model_field.primary_key
+                    || model_field.auto_now
+                    || model_field.auto_now_add,
                 write_only: field.write_only,
                 required: field.required,
                 nullable: field.nullable || model_field.nullable,
@@ -946,18 +987,19 @@ where
 
 fn api_filters<M>(filters: &[Filter]) -> Vec<crate::ApiFilter>
 where
-    M: SqliteModel<Id = i64>,
+    M: Model,
 {
     filters
         .iter()
         .filter_map(|filter| {
-            let model_field = M::fields()
-                .iter()
-                .find(|model_field| model_field.db_name == filter.source)?;
+            let schema = M::schema();
+            let model_field = schema.columns.iter().find(|model_field| {
+                model_field.name == filter.source || model_field.field_name == filter.source
+            })?;
             Some(crate::ApiFilter {
                 name: filter.query_name(),
                 source: filter.source.to_string(),
-                ty: model_field.ty,
+                ty: model_field.column_type,
                 nullable: model_field.nullable,
             })
         })

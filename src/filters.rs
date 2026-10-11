@@ -1,6 +1,9 @@
 use std::{collections::HashMap, marker::PhantomData};
 
-use che_orm::{FieldInfo, FieldType, Model, QueryBuilder, SqliteModel, SqliteValue};
+use che_orm::{
+    ColumnRef, ColumnSchema, ColumnType, CompareOp, DatabaseValue, Expr, Model, OrderBy,
+    OrderDirection, SelectQuery,
+};
 use serde_json::Value;
 
 use crate::error::ApiResult;
@@ -124,7 +127,7 @@ impl<M> Copy for FilterSet<M> {}
 
 impl<M> FilterSet<M>
 where
-    M: SqliteModel,
+    M: Model,
 {
     pub const fn new(filters: &'static [Filter]) -> Self {
         Self {
@@ -220,21 +223,21 @@ where
         Value::Object(object)
     }
 
-    pub fn apply<'db>(
+    pub fn apply(
         &self,
-        mut query: QueryBuilder<'db, M>,
+        mut query: SelectQuery<M>,
         params: &HashMap<String, String>,
-    ) -> ApiResult<QueryBuilder<'db, M>> {
+    ) -> ApiResult<SelectQuery<M>> {
         for (name, value) in params {
             match name.as_str() {
                 "ordering" => {
                     query = self.apply_ordering(query, value)?;
                 }
                 "limit" => {
-                    query = query.limit(parse_u32("limit", value)?);
+                    query = query.limit(u64::from(parse_u32("limit", value)?));
                 }
                 "offset" => {
-                    query = query.offset(parse_u32("offset", value)?);
+                    query = query.offset(u64::from(parse_u32("offset", value)?));
                 }
                 name => {
                     let filter = self
@@ -246,16 +249,36 @@ where
                     }
 
                     let field = model_field::<M>(filter.source)?;
-                    validate_lookup(field, filter.lookup)?;
-                    let value = parse_value(field, value)?;
-                    query = match filter.lookup {
-                        Lookup::Exact => query.eq(filter.source, value),
-                        Lookup::Contains => query.contains(filter.source, value),
-                        Lookup::Gt => query.gt(filter.source, value),
-                        Lookup::Gte => query.gte(filter.source, value),
-                        Lookup::Lt => query.lt(filter.source, value),
-                        Lookup::Lte => query.lte(filter.source, value),
+                    validate_lookup(&field, filter.lookup)?;
+                    let value = parse_value(&field, value)?;
+                    let column =
+                        Box::new(Expr::Column(ColumnRef::new(M::table_name(), field.name)));
+                    let expr = if filter.lookup == Lookup::Contains {
+                        let DatabaseValue::Text(value) = value else {
+                            unreachable!()
+                        };
+                        Expr::Like {
+                            left: column,
+                            pattern: Box::new(Expr::Value(DatabaseValue::Text(format!(
+                                "%{value}%"
+                            )))),
+                        }
+                    } else {
+                        let op = match filter.lookup {
+                            Lookup::Exact => CompareOp::Eq,
+                            Lookup::Gt => CompareOp::Gt,
+                            Lookup::Gte => CompareOp::Gte,
+                            Lookup::Lt => CompareOp::Lt,
+                            Lookup::Lte => CompareOp::Lte,
+                            Lookup::Contains => unreachable!(),
+                        };
+                        Expr::Compare {
+                            left: column,
+                            op,
+                            right: Box::new(Expr::Value(value)),
+                        }
                     };
+                    query = query.filter(expr);
                 }
             }
         }
@@ -286,11 +309,7 @@ where
         }
     }
 
-    fn apply_ordering<'db>(
-        &self,
-        query: QueryBuilder<'db, M>,
-        value: &str,
-    ) -> ApiResult<QueryBuilder<'db, M>> {
+    fn apply_ordering(&self, query: SelectQuery<M>, value: &str) -> ApiResult<SelectQuery<M>> {
         let field = value.strip_prefix('-').unwrap_or(value);
         if !self.filters.iter().any(|filter| filter.name == field) {
             return Err(FilterError::UnknownOrdering(field.to_string()).into());
@@ -301,13 +320,15 @@ where
             .find(|filter| filter.name == field)
             .map(|filter| filter.source)
             .unwrap_or(field);
-        model_field::<M>(source)?;
-
-        Ok(if value.starts_with('-') {
-            query.order_by(&format!("-{source}"))
-        } else {
-            query.order_by(source)
-        })
+        let field = model_field::<M>(source)?;
+        Ok(query.order_by(OrderBy {
+            column: ColumnRef::new(M::table_name(), field.name),
+            direction: if value.starts_with('-') {
+                OrderDirection::Desc
+            } else {
+                OrderDirection::Asc
+            },
+        }))
     }
 }
 
@@ -374,40 +395,56 @@ pub enum FilterError {
     InvalidModelField(String),
 }
 
-fn model_field<M: Model>(name: &str) -> Result<&'static FieldInfo, FilterError> {
-    M::fields()
-        .iter()
-        .find(|field| field.rust_name == name || field.db_name == name)
+fn model_field<M: Model>(name: &str) -> Result<ColumnSchema, FilterError> {
+    M::schema()
+        .columns
+        .into_iter()
+        .find(|field| field.field_name == name || field.name == name)
         .ok_or_else(|| FilterError::InvalidModelField(name.to_string()))
 }
 
-fn parse_value(field: &FieldInfo, value: &str) -> Result<SqliteValue, FilterError> {
-    match field.ty {
-        FieldType::Integer => value
+fn parse_value(field: &ColumnSchema, value: &str) -> Result<DatabaseValue, FilterError> {
+    match field.column_type {
+        ColumnType::Integer => value
             .parse::<i64>()
-            .map(SqliteValue::from)
+            .map(DatabaseValue::Integer)
             .map_err(|_| invalid_value(field, "integer")),
-        FieldType::Text => Ok(SqliteValue::from(value)),
-        FieldType::Boolean => parse_bool(value)
-            .map(SqliteValue::from)
-            .ok_or_else(|| invalid_value(field, "boolean")),
-        FieldType::Real => value
+        ColumnType::Text => Ok(DatabaseValue::Text(value.to_string())),
+        ColumnType::Uuid => che_orm::Uuid::parse_str(value)
+            .map(DatabaseValue::Uuid)
+            .map_err(|_| invalid_value(field, "UUID string")),
+        ColumnType::Real => value
             .parse::<f64>()
-            .map(SqliteValue::from)
-            .map_err(|_| invalid_value(field, "number")),
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(DatabaseValue::Real)
+            .ok_or_else(|| invalid_value(field, "finite number")),
+        ColumnType::Boolean => parse_bool(value)
+            .map(DatabaseValue::Boolean)
+            .ok_or_else(|| invalid_value(field, "boolean")),
+        ColumnType::DateTime => che_orm::time::OffsetDateTime::parse(
+            value,
+            &che_orm::time::format_description::well_known::Rfc3339,
+        )
+        .map(DatabaseValue::DateTime)
+        .map_err(|_| invalid_value(field, "RFC 3339 timestamp")),
+        ColumnType::Binary => Err(invalid_value(field, "binary filters are unsupported")),
     }
 }
 
-fn validate_lookup(field: &FieldInfo, lookup: Lookup) -> Result<(), FilterError> {
+fn validate_lookup(field: &ColumnSchema, lookup: Lookup) -> Result<(), FilterError> {
     match lookup {
         Lookup::Exact => Ok(()),
-        Lookup::Contains if field.ty == FieldType::Text => Ok(()),
+        Lookup::Contains if field.column_type == ColumnType::Text => Ok(()),
         Lookup::Gt | Lookup::Gte | Lookup::Lt | Lookup::Lte
-            if matches!(field.ty, FieldType::Integer | FieldType::Real) =>
+            if matches!(
+                field.column_type,
+                ColumnType::Integer | ColumnType::Real | ColumnType::DateTime
+            ) =>
         {
             Ok(())
         }
-        _ => Err(FilterError::InvalidLookup(field.rust_name.to_string())),
+        _ => Err(FilterError::InvalidLookup(field.field_name.to_string())),
     }
 }
 
@@ -426,9 +463,9 @@ fn parse_u32(field: &str, value: &str) -> Result<u32, FilterError> {
     })
 }
 
-fn invalid_value(field: &FieldInfo, expected: &'static str) -> FilterError {
+fn invalid_value(field: &ColumnSchema, expected: &'static str) -> FilterError {
     FilterError::InvalidValue {
-        field: field.rust_name.to_string(),
+        field: field.field_name.to_string(),
         expected,
     }
 }

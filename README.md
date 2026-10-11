@@ -21,7 +21,7 @@ Use it from an app crate with path dependencies:
 
 ```toml
 [dependencies]
-che-orm = { path = "../../che-orm/crates/che-orm" }
+che-orm = { path = "../../che-orm" }
 che-tauri = { path = "../../che-tauri" }
 tauri = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -45,7 +45,7 @@ auth_path = "/api-token-auth/"
 Equivalent manual setup is also supported:
 
 ```rust
-use che_orm::SqliteBackend;
+use che_orm::Database;
 use che_tauri::{AppConfig, AppState, DatabaseConfig, RemoteConfig};
 
 # async fn example() -> che_tauri::ApiResult<AppState> {
@@ -58,7 +58,7 @@ let config = AppConfig {
         auth_path: Some("/api-token-auth/".to_string()),
     }),
 };
-let db = SqliteBackend::connect(&config.database.url).await?;
+let db = Database::connect("app.sqlite").await?;
 let state = AppState::new(config, db);
 # Ok(state)
 # }
@@ -106,21 +106,38 @@ impl AppModule for UsersModule {
 
 ## Models
 
-Models are regular `che-orm` models:
+Models use the `che-orm` 0.3 API and derive `serde::Serialize` for response serialization:
 
 ```rust
 use che_orm::Model;
 
-#[derive(Debug, Clone, Model)]
-#[model(table = "users")]
+#[derive(Debug, Clone, serde::Serialize, Model)]
+#[orm(table = "users")]
 pub struct User {
-    #[field(primary_key)]
+    #[orm(primary_key)]
     pub id: i64,
     pub email: String,
     pub name: String,
     pub is_active: bool,
 }
 ```
+
+Resource serializers read values through `Model::field_values()`, independently
+of `#[serde(rename)]` and `#[serde(rename_all)]` on models. `Field::source` resolves
+Rust field names and physical SQL column names; `Field::name` determines the
+response key. Timestamps are emitted as RFC 3339 strings, and binary fields are
+JSON byte arrays.
+`f64` and `Option<f64>` fields use SQLite `REAL`, JSON/TypeScript numbers and
+numeric filters; remote cache writes preserve fractional values.
+UUID fields use JSON/TypeScript strings and support exact filters. Invoke resource
+IDs and related serializer IDs remain `i64`; UUID primary keys are not supported
+by the invoke request format.
+`AppState::from_config_file` accepts SQLite file paths, `file:` URIs and the
+`sqlite://...` configuration syntax. Query parameters are passed to SQLite:
+`mode=ro` opens read-only, `mode=rw` requires an existing file, and `mode=rwc`
+allows creation. In-memory databases, including `mode=memory` URIs, use one
+pooled connection. Manual `Database::connect` accepts a file path or SQLite
+`file:` URI.
 
 ## Serializers
 
@@ -339,6 +356,23 @@ Create migrations for one installed app:
 cargo run --bin manage -- makemigrations users
 ```
 
+New migrations are Rust files using `che_orm::Migration` operations. The command
+updates `src/apps/users/migrations/mod.rs`. Register them in the app module:
+
+```rust
+pub mod migrations;
+
+// Inside impl AppModule for UsersModule:
+fn migrations(&self) -> Vec<che_orm::Migration> {
+    migrations::migrations()
+}
+```
+
+Rebuild `manage` after generation so the new migration is compiled. `startapp`
+creates this registration automatically. Migration discovery and numbering use
+only `.rs` files, excluding `mod.rs`. Schema state and migration history are
+managed by `che-orm` through the registered migration graph.
+
 Use a custom migration name:
 
 ```bash
@@ -396,7 +430,7 @@ Useful source files:
 
 ## Notes
 
-- Local resources require `SqliteModel<Id = i64>`.
+- Resource models require `Model + serde::Serialize + Send + Sync + 'static`; `che-orm` uses `i64` primary keys.
 - Remote resources still require model metadata so serializers, filters and generated TypeScript can be derived.
 - `raw_remote_resource` and `mapped_remote_resource` do not create local SQLite tables.
 - Generated TypeScript should be regenerated from metadata rather than edited by hand.

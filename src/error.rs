@@ -39,18 +39,19 @@ impl std::error::Error for ApiError {}
 
 pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
-impl From<che_orm::Error> for ApiError {
-    fn from(error: che_orm::Error) -> Self {
+impl From<che_orm::OrmError> for ApiError {
+    fn from(error: che_orm::OrmError) -> Self {
         match &error {
-            che_orm::Error::UnknownField(_)
-            | che_orm::Error::ReadonlyField(_)
-            | che_orm::Error::EmptyUpdate
-            | che_orm::Error::MissingPrimaryKey => Self::bad_request(error.to_string()),
-            che_orm::Error::Database(che_orm::__private::sqlx::Error::RowNotFound) => {
+            che_orm::OrmError::QueryBuild(_) => Self::bad_request(error.to_string()),
+            che_orm::OrmError::Sqlite(che_orm::rusqlite::Error::QueryReturnedNoRows) => {
                 Self::not_found(error.to_string())
             }
-            che_orm::Error::Database(_) => Self::new("database_error", error.to_string()),
-            che_orm::Error::Io(_) | che_orm::Error::Json(_) => Self::internal(error.to_string()),
+            che_orm::OrmError::Sqlite(_) => Self::new("database_error", error.to_string()),
+            che_orm::OrmError::Configuration(_)
+            | che_orm::OrmError::Decode(_)
+            | che_orm::OrmError::Migration(_)
+            | che_orm::OrmError::Pool(_)
+            | che_orm::OrmError::Interaction(_) => Self::internal(error.to_string()),
         }
     }
 }

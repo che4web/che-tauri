@@ -20,3 +20,4 @@ pub use serializer::{Field, ModelSerializer, RelatedModel, RelatedSerializer, Se
 pub use state::AppState;
 
 pub use che_orm;
+mod database;

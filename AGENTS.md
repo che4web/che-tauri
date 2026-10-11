@@ -10,7 +10,7 @@ It mirrors the `che-rest` app/module/serializer/filter architecture, but dispatc
 
 - Rust edition 2024.
 - Tauri 2 invoke command integration.
-- `che-orm` SQLite models and query builders.
+- `che-orm` 0.3 SQLite async `Database`, models, query ASTs and typed query builders.
 - `reqwest` for remote REST resources.
 - `serde`/`serde_json` for request and response payloads.
 - `clap` for project-local management commands.
@@ -25,13 +25,13 @@ It mirrors the `che-rest` app/module/serializer/filter architecture, but dispatc
 - `src/serializer.rs`: `Field`, `ModelSerializer`, related serializers, JSON validation and remote normalization.
 - `src/filters.rs`: `Filter`, `FilterSet`, lookup parsing, local filters, remote filter forwarding.
 - `src/management.rs`: `startapp`, `makemigrations`, `migrate`, `generate-ts`.
-- `src/state.rs`: `AppState`, SQLite backend, auth token storage.
+- `src/state.rs`: `AppState`, SQLite `Database`, auth token storage.
 - `src/config.rs`: `AppConfig`, `DatabaseConfig`, `RemoteConfig`.
 - `src/error.rs`: `ApiError` and `ApiResult`.
 
 ## Public Concepts
 
-- `AppState`: config, SQLite backend and current auth token.
+- `AppState`: config, SQLite `Database` and current auth token.
 - `TauriApi`: built resource dispatcher managed by Tauri state.
 - `che_api`: Tauri command that dispatches `ApiRequest` actions.
 - `InstalledApps`: list of app modules installed into runtime or management CLI.
@@ -81,7 +81,10 @@ Notes:
 - `ctx.mapped_remote_resource` normalizes remote JSON through serializers and supports local-only JSON filters.
 - `ctx.raw_remote_resource` proxies remote JSON mostly unchanged but still emits generated TS metadata.
 - `ctx.remote_resource` currently delegates to mapped remote resource behavior.
-- All resource model types currently require `SqliteModel<Id = i64>`.
+- Resource model types require `Model + serde::Serialize + Send + Sync + 'static`.
+- Models use `#[orm(table = "...")]` and `#[orm(primary_key)]`; primary keys are `i64`.
+- Resource serializers use `Model::field_values()` independently of Serde field renames. Timestamp fields are RFC 3339 strings; binary fields are JSON byte arrays.
+- Management migrations use compiled `.rs` files with `che_orm::Migration` operations registered through `AppModule::migrations()`; `startapp` generates this hook. Schema state and migration history are managed by the registered `che-orm` migration graph.
 
 ## Serializer Rules
 
