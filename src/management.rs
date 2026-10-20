@@ -233,6 +233,8 @@ impl Management {
         fs::write(out.join("api_client.ts"), api_client_ts())?;
         fs::write(out.join("models.ts"), models_ts(&endpoints))?;
         fs::write(out.join("api.ts"), api_ts(&endpoints))?;
+        #[cfg(feature = "sync")]
+        fs::write(out.join("sync.ts"), crate::sync::TYPESCRIPT_CLIENT)?;
 
         println!("Generated TypeScript Tauri API in {}", out.display());
         Ok(())

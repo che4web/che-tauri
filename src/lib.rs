@@ -6,6 +6,8 @@ pub mod management;
 pub mod module;
 pub mod serializer;
 pub mod state;
+#[cfg(feature = "sync")]
+pub mod sync;
 
 pub use api::{
     ApiAction, ApiRequest, AuthTokenResponse, CachedMappedRemoteInvokeSet, MappedRemoteInvokeSet,
@@ -20,4 +22,8 @@ pub use serializer::{Field, ModelSerializer, RelatedModel, RelatedSerializer, Se
 pub use state::AppState;
 
 pub use che_orm;
+#[cfg(feature = "sync")]
+pub use che_sync;
+#[cfg(feature = "sync")]
+pub use sync::{SyncRequest, SyncResolution, SyncResponse, SyncStatus, TauriSync, che_model_sync};
 mod database;

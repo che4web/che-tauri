@@ -41,6 +41,19 @@ impl InstalledApps {
     pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.iter().map(AppModule::name)
     }
+
+    /// Build a protocol-2 client registry in module registration order.
+    /// Call after applying the modules' compiled migrations.
+    #[cfg(feature = "sync")]
+    pub fn sync_registry(&self) -> crate::ApiResult<che_sync::Registry> {
+        let mut schema = SchemaSet::new();
+        for module in self.iter() {
+            let mut ctx = ModuleContext::new();
+            module.init(&mut ctx);
+            schema = schema.merge(ctx.schemas);
+        }
+        Ok(che_sync::Registry::from_schema(&schema)?)
+    }
 }
 
 #[derive(Default)]
@@ -85,6 +98,13 @@ pub struct ApiFilter {
 impl ModuleContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register a UUID sync model and its client service schema for compiled
+    /// migrations. This does not create tables or register i64 CRUD handlers.
+    #[cfg(feature = "sync")]
+    pub fn sync_model<M: che_sync::SyncModel>(&mut self) {
+        self.schemas = std::mem::take(&mut self.schemas).client_model::<M>();
     }
 
     pub fn model<M>(&mut self)

@@ -14,6 +14,7 @@ Tauri invoke API layer for `che-orm` applications.
 - Filter metadata for generated list params and local/remote filtering.
 - Project-local management CLI for `startapp`, migrations and TypeScript generation.
 - Shared auth token storage in `AppState` for remote requests.
+- Optional protocol-2 offline synchronization through `TauriSync` and `che_model_sync`.
 
 ## Install
 
@@ -435,3 +436,102 @@ Useful source files:
 - `raw_remote_resource` and `mapped_remote_resource` do not create local SQLite tables.
 - Generated TypeScript should be regenerated from metadata rather than edited by hand.
 - Migrations are app-scoped under `src/apps/<app>/migrations` in consuming applications.
+
+## Offline synchronization (protocol 2)
+
+Enable `che-tauri = { path = "../che-tauri", features = ["sync"] }`.
+`TauriSync` integrates the existing `che-sync::ModelLogClient`; it exposes
+`pull`, `flush`, `sync_once`, `conflicts` and `resolve` to Rust and Tauri invoke.
+The engine owns persistent current/shadow data, outbox, immutable submitted
+payloads, model cursors and conflict resolution. Clones share one client and its
+locks. Open one client per database; independent concurrent clients/processes
+against the same file are unsupported.
+
+Declare synchronized models with UUID primary keys, `#[orm(sync)]` and stable
+`sync_name` values. Register them in FK parent-first order in app modules:
+
+```rust,ignore
+fn init(&self, ctx: &mut ModuleContext) {
+    ctx.sync_model::<models::Note>();
+}
+```
+
+`sync_model` registers the **client** schema for `makemigrations`, including
+sync service tables. Generate, review and apply compiled migrations before
+opening the client. This registration does not run startup CREATE TABLE SQL.
+Existing local/remote resources and their i64 invoke IDs remain separate; expose
+UUID CRUD through application commands calling `TauriSync::save`, `delete` and
+`database`. Do not register the same sync table as a cached remote resource:
+authentication cache invalidation must never clear durable offline edits.
+
+The application supplies a `che_sync::ModelLogTransport`. For the existing REST
+protocol use `che_rest::sync_http::{RestModelTransport, RestResource}` with
+`che-rest`'s `sync-http` feature. HTTP routing, serializer mapping and retry payload
+encoding stay in that adapter; `che-tauri` does not duplicate the wire protocol.
+Use the server's ORM serializer type for each `RestResource` mapping.
+`che-rest` currently uses reqwest 0.12, so give its transport a matching client
+(for example an application dependency named `reqwest_sync` with package
+`reqwest`, version `0.12`, features `json,rustls-tls`, default features disabled).
+
+```rust,ignore
+use che_tauri::{TauriSync, che_model_sync};
+use che_rest::sync_http::{RestModelTransport, RestResource};
+
+// `database` has already had the installed modules' compiled migrations applied.
+let transport = RestModelTransport::new(
+    "https://host/api",
+    authenticated_http_client, // reqwest 0.12: configure credentials and timeout
+    vec![RestResource::new::<Note, NoteSerializer>("notes")?],
+)?;
+let sync = TauriSync::open(database, apps.sync_registry()?, transport).await?;
+// Optional: initialize journals while online. Opening itself performs no network IO.
+// sync.pull().await?;
+
+tauri::Builder::default()
+    .manage(sync)
+    .invoke_handler(tauri::generate_handler![che_model_sync])
+    // Add che_api and application UUID CRUD commands to this same handler list.
+    .run(tauri::generate_context!())?;
+```
+
+Use `TauriSync::from_engine(client.engine(transport).with_page_size(50)?)` to
+customize page size. Save offline edits through the managed client's `save` or
+its configured `database()` handle, so capture remains active. Saving through
+another unconfigured database handle bypasses sync capture.
+
+With the `sync` feature, `generate-ts` also writes `sync.ts`:
+
+```ts
+import { modelSync } from "./generated/sync";
+
+const report = await modelSync.syncOnce();
+if (report.conflicts > 0 || report.blocked) {
+  const conflicts = await modelSync.conflicts();
+  // Show the competing versions and let the user choose.
+  // await modelSync.resolve(conflict.model, conflict.id, { strategy: "remote" });
+}
+// Schedule another bounded step when appropriate; inspect report.has_more.
+```
+
+Raw invoke uses `invoke("che_model_sync", { request: { action: "pull" } })`.
+Responses are tagged as `{ kind: "report", data: ... }`,
+`{ kind: "conflicts", data: [...] }` or `{ kind: "resolved" }`.
+Resolution strategies are `local`, `remote`, and `record` with typed protocol
+values (or `record: null` for deletion). Integer values and revisions are decimal
+strings to preserve i64 precision; record values distinguish SQL NULL from JSON
+null. UUIDs are strings. Errors use the usual `{ code, detail }` shape.
+
+No background loop starts implicitly. Pull downloads one page per model; repeat
+while `has_more` is true. Flush sends at most one coalesced record per model and
+retries submitted operations first. `sync_once` settles pending submissions,
+pulls journals, then sends new changes when caught up. Stop automatic retry loops
+on conflicts/blocked results and use the application's retry policy for network
+errors. Transport/authentication failures leave submitted requests pending.
+
+`TauriSync` is independent of `AppState`'s remote response cache and auth token.
+The supplied transport owns credentials. Login/logout must never delete the
+outbox or silently rebind a database with pending writes to another account or
+server. Keep a separate persistent sync database/runtime for each server/account;
+recreate the authenticated transport for the same account when credentials renew.
+Keep existing legacy sync databases on their original protocol until explicitly
+migrated. Opening protocol 2 does not convert them or create application tables.

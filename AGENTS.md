@@ -179,3 +179,12 @@ npm run build
 - `../ewa-mobile/src-tauri` uses `che-tauri` for local/remote resources and generated frontend APIs.
 
 Before making broad API changes, inspect current usage in `../ewa-mobile/src-tauri/src/apps` and generated API expectations in `../ewa-mobile/src/generated`.
+
+## Optional Synchronization
+
+- Enable `sync` for `TauriSync`, `che_model_sync` and generated `sync.ts`.
+- `ModuleContext::sync_model` registers protocol-2 client schemas for compiled migrations; it must not emit startup table creation SQL. `InstalledApps::sync_registry` preserves module registration order (FK parents first).
+- Sync models have UUID IDs. Existing `che_api` resources retain i64 IDs; application UUID CRUD commands call the managed sync client's `save`, `delete` or configured `database` handle.
+- `che-sync` owns persistence, capture, outbox, journals and merge. Supply a `ModelLogTransport`; reuse `che-rest/sync-http` for HTTP rather than duplicating its protocol in Tauri.
+- Keep durable sync databases separate from remote response caches. Credential/cache invalidation must not clear pending edits or silently change their server/account. One runtime per database; clones share its locks.
+- Run `cargo test --features sync` as well as default tests. HTTP tests need ephemeral loopback ports. The sync tests cover request replay after reopening, conflict resolution, UUID/record input validation and journal pagination.
