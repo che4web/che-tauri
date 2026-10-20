@@ -13,7 +13,7 @@ pub struct DatabaseConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct RemoteConfig {
     pub base_url: String,
     pub auth_path: Option<String>,

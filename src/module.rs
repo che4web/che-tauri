@@ -62,6 +62,7 @@ pub struct ModuleContext {
     schemas: SchemaSet,
     api_endpoints: Vec<ApiEndpoint>,
     resources: Vec<ResourceRegistration>,
+    cache_tables: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +229,7 @@ impl ModuleContext {
             filterset,
         );
         self.model::<M>();
+        self.cache_tables.push(M::table_name());
         self.api_endpoints.push(ApiEndpoint {
             model_name: rust_type_name::<M>(),
             resource: resource.to_string(),
@@ -249,8 +251,8 @@ impl ModuleContext {
         &self.api_endpoints
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<String>, Vec<ResourceRegistration>) {
-        (self.sql, self.resources)
+    pub(crate) fn into_parts(self) -> (Vec<String>, Vec<ResourceRegistration>, Vec<&'static str>) {
+        (self.sql, self.resources, self.cache_tables)
     }
 }
 

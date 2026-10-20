@@ -22,7 +22,7 @@ Use it from an app crate with path dependencies:
 
 ```toml
 [dependencies]
-che-orm = { path = "../../che-orm" }
+che-orm = "0.3"
 che-tauri = { path = "../../che-tauri" }
 tauri = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -222,7 +222,36 @@ ctx.mapped_remote_resource::<models::User>(
 );
 ```
 
-This forwards requests to the remote API, normalizes responses through the serializer, applies local-only JSON filters, and includes the resource in generated TypeScript. It does not create a local table.
+This forwards requests to the remote API, normalizes list/retrieve/create/update responses through the serializer, applies local-only JSON filters, and includes the resource in generated TypeScript. Source mappings and write-only exclusions apply consistently to all response actions. It does not create a local table.
+
+Local-only filters support the same `exact`, `contains`, `gt`, `gte`, `lt`, and `lte`
+lookups as local resources. Range comparisons use the model field type: integers
+retain their precision, real fields use numeric comparisons, and RFC 3339 timestamps
+are compared as instants. Invalid local-only filter values return `bad_request`
+before a remote request is sent.
+
+Cached mapped remote resource:
+
+```rust
+ctx.cached_mapped_remote_resource::<models::User>(
+    "users",
+    "/api/users/",
+    serializers::user_serializer(),
+    filters::user_filterset(),
+);
+```
+
+This creates a local cache table and uses cached records before requesting the
+remote API. List requests accept `force_remote: true` to bypass the cache. All
+cached actions require an authentication token, including local cache hits.
+
+Cached tables belong to the current remote session. Changing the token, logging
+out, or changing the remote configuration invalidates the cache; all registered
+cached tables are cleared together before the first cached action in a new
+authenticated session. Ordinary local resource tables are preserved. Setting the
+same token again keeps the current cache. On process restart, existing cached rows
+are also cleared on first authenticated cache access. Responses still in flight
+when the session changes are rejected and cannot be reused by the new session.
 
 Raw remote REST resource:
 
@@ -329,6 +358,10 @@ Authorization: Token <token>
 ```
 
 Applications can expose custom Tauri commands for login/logout/token restore around `TauriApi::login`, `set_auth_token`, `logout`, and `is_authenticated`.
+
+`AppState::set_remote_config` clears the authentication token when the remote
+configuration changes. Authenticate again against the new server before using
+remote resources.
 
 ## Management CLI
 

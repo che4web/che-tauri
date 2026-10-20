@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::Path,
     sync::{Arc, RwLock},
 };
@@ -7,14 +8,44 @@ use che_orm::Database;
 
 use crate::{
     config::{AppConfig, RemoteConfig},
-    error::ApiResult,
+    error::{ApiError, ApiResult},
 };
 
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<RwLock<AppConfig>>,
     db: Database,
-    auth_token: Arc<RwLock<Option<String>>>,
+    auth: Arc<RwLock<AuthState>>,
+    cache: Arc<tokio::sync::Mutex<CacheState>>,
+    cache_tables: Arc<RwLock<HashSet<&'static str>>>,
+}
+
+#[derive(Default)]
+struct AuthState {
+    token: Option<String>,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct CacheState {
+    generation: Option<u64>,
+}
+
+pub(crate) struct CacheSession<'a> {
+    _guard: tokio::sync::MutexGuard<'a, CacheState>,
+    generation: u64,
+}
+
+impl CacheSession<'_> {
+    pub(crate) fn finish<T>(&self, state: &AppState, result: ApiResult<T>) -> ApiResult<T> {
+        if state.auth.read().expect("auth lock poisoned").generation != self.generation {
+            return Err(ApiError::new(
+                "not_authenticated",
+                "remote session changed during request",
+            ));
+        }
+        result
+    }
 }
 
 impl AppState {
@@ -29,7 +60,9 @@ impl AppState {
         Self {
             config: Arc::new(RwLock::new(config)),
             db,
-            auth_token: Arc::new(RwLock::new(None)),
+            auth: Arc::new(RwLock::new(AuthState::default())),
+            cache: Arc::new(tokio::sync::Mutex::new(CacheState::default())),
+            cache_tables: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -45,10 +78,13 @@ impl AppState {
     }
 
     pub fn set_remote_config(&self, remote: Option<RemoteConfig>) {
-        self.config
-            .write()
-            .expect("app config lock poisoned")
-            .remote = remote;
+        let mut config = self.config.write().expect("app config lock poisoned");
+        if config.remote != remote {
+            let mut auth = self.auth.write().expect("auth lock poisoned");
+            auth.token = None;
+            auth.generation += 1;
+            config.remote = remote;
+        }
     }
 
     pub fn db(&self) -> &Database {
@@ -56,18 +92,67 @@ impl AppState {
     }
 
     pub fn set_auth_token(&self, token: impl Into<String>) {
-        *self.auth_token.write().expect("auth token lock poisoned") = Some(token.into());
+        let token = token.into();
+        let mut auth = self.auth.write().expect("auth lock poisoned");
+        if auth.token.as_ref() != Some(&token) {
+            auth.token = Some(token);
+            auth.generation += 1;
+        }
     }
 
     pub fn clear_auth_token(&self) {
-        *self.auth_token.write().expect("auth token lock poisoned") = None;
+        let mut auth = self.auth.write().expect("auth lock poisoned");
+        auth.token = None;
+        auth.generation += 1;
     }
 
     pub fn auth_token(&self) -> Option<String> {
-        self.auth_token
-            .read()
-            .expect("auth token lock poisoned")
-            .clone()
+        self.auth.read().expect("auth lock poisoned").token.clone()
+    }
+
+    pub(crate) fn register_cache_table(&self, table: &'static str) {
+        self.cache_tables
+            .write()
+            .expect("cache tables lock poisoned")
+            .insert(table);
+    }
+
+    pub(crate) async fn cache_session(&self, table: &'static str) -> ApiResult<CacheSession<'_>> {
+        self.register_cache_table(table);
+        let mut cache = self.cache.lock().await;
+        let generation = {
+            let auth = self.auth.read().expect("auth lock poisoned");
+            if auth.token.as_ref().is_none_or(|token| token.is_empty()) {
+                return Err(ApiError::new(
+                    "not_authenticated",
+                    "authentication token is missing",
+                ));
+            }
+            auth.generation
+        };
+        if cache.generation != Some(generation) {
+            let tables = self
+                .cache_tables
+                .read()
+                .expect("cache tables lock poisoned")
+                .clone();
+            let sql = tables
+                .iter()
+                .map(|table| format!("DELETE FROM \"{}\";", table.replace('"', "\"\"")))
+                .collect::<String>();
+            // Clear all cached resources together, including related models, while
+            // preserving ordinary local resources and the migration history.
+            self.db
+                .raw_transaction(move |connection| {
+                    connection.execute_batch(&format!("PRAGMA defer_foreign_keys = ON;{sql}"))
+                })
+                .await?;
+            cache.generation = Some(generation);
+        }
+        Ok(CacheSession {
+            _guard: cache,
+            generation,
+        })
     }
 }
 

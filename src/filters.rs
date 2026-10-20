@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData};
+use std::{cmp::Ordering, collections::HashMap, marker::PhantomData};
 
 use che_orm::{
     ColumnRef, ColumnSchema, ColumnType, CompareOp, DatabaseValue, Expr, Model, OrderBy,
@@ -212,7 +212,7 @@ where
             .filter(|item| {
                 local_filters
                     .iter()
-                    .all(|(filter, value)| json_item_matches_filter(item, filter, value))
+                    .all(|(filter, value)| json_item_matches_filter::<M>(item, filter, value))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -221,6 +221,21 @@ where
         object.insert("results".to_string(), Value::Array(filtered));
 
         Value::Object(object)
+    }
+
+    pub(crate) fn validate_json_params(&self, params: &HashMap<String, String>) -> ApiResult<()> {
+        for (name, value) in params {
+            let Some(filter) = self.filter_by_query_name(name) else {
+                continue;
+            };
+            if filter.remote_mode != RemoteFilterMode::LocalOnly || value.is_empty() {
+                continue;
+            }
+            let field = model_field::<M>(filter.source)?;
+            validate_lookup(&field, filter.lookup)?;
+            parse_value(&field, value)?;
+        }
+        Ok(())
     }
 
     pub fn apply(
@@ -340,7 +355,7 @@ impl Filter {
     }
 }
 
-fn json_item_matches_filter(item: &Value, filter: &Filter, expected: &str) -> bool {
+fn json_item_matches_filter<M: Model>(item: &Value, filter: &Filter, expected: &str) -> bool {
     let Some(value) = json_lookup(item, filter.name).or_else(|| json_lookup(item, filter.source))
     else {
         return false;
@@ -352,7 +367,38 @@ fn json_item_matches_filter(item: &Value, filter: &Filter, expected: &str) -> bo
             let expected = expected.to_lowercase();
             json_value_text(value).is_some_and(|value| value.to_lowercase().contains(&expected))
         }
-        Lookup::Gt | Lookup::Gte | Lookup::Lt | Lookup::Lte => true,
+        Lookup::Gt | Lookup::Gte | Lookup::Lt | Lookup::Lte => {
+            let Ok(field) = model_field::<M>(filter.source) else {
+                return false;
+            };
+            let Ok(expected) = parse_value(&field, expected) else {
+                return false;
+            };
+            let ordering = match expected {
+                DatabaseValue::Integer(expected) => {
+                    value.as_i64().map(|value| value.cmp(&expected))
+                }
+                DatabaseValue::Real(expected) => value
+                    .as_f64()
+                    .and_then(|value| value.partial_cmp(&expected)),
+                DatabaseValue::DateTime(expected) => value.as_str().and_then(|value| {
+                    che_orm::time::OffsetDateTime::parse(
+                        value,
+                        &che_orm::time::format_description::well_known::Rfc3339,
+                    )
+                    .ok()
+                    .map(|value| value.cmp(&expected))
+                }),
+                _ => None,
+            };
+            match filter.lookup {
+                Lookup::Gt => ordering == Some(Ordering::Greater),
+                Lookup::Gte => matches!(ordering, Some(Ordering::Greater | Ordering::Equal)),
+                Lookup::Lt => ordering == Some(Ordering::Less),
+                Lookup::Lte => matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
+                _ => unreachable!(),
+            }
+        }
     }
 }
 

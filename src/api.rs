@@ -337,6 +337,7 @@ where
     }
 
     async fn list(&self, state: &AppState, params: HashMap<String, String>) -> ApiResult<Value> {
+        self.filterset.validate_json_params(&params)?;
         let original_params = params.clone();
         let params = self.filterset.remote_params(&params);
         let response = with_token(
@@ -374,7 +375,8 @@ where
         .json(&payload)
         .send()
         .await?;
-        remote_json(response).await
+        let value = remote_json(response).await?;
+        Ok(self.serializer.normalize_remote_value(value))
     }
 
     async fn update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
@@ -389,7 +391,8 @@ where
         .json(&payload)
         .send()
         .await?;
-        remote_json(response).await
+        let value = remote_json(response).await?;
+        Ok(self.serializer.normalize_remote_value(value))
     }
 
     async fn delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
@@ -421,6 +424,41 @@ where
     }
 
     async fn list(&self, state: &AppState, params: HashMap<String, String>) -> ApiResult<Value> {
+        let session = state.cache_session(M::table_name()).await?;
+        session.finish(state, self.cached_list(state, params).await)
+    }
+
+    async fn retrieve(&self, state: &AppState, id: i64) -> ApiResult<Value> {
+        let session = state.cache_session(M::table_name()).await?;
+        session.finish(state, self.cached_retrieve(state, id).await)
+    }
+
+    async fn create(&self, state: &AppState, payload: Value) -> ApiResult<Value> {
+        let session = state.cache_session(M::table_name()).await?;
+        session.finish(state, self.cached_create(state, payload).await)
+    }
+
+    async fn update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
+        let session = state.cache_session(M::table_name()).await?;
+        session.finish(state, self.cached_update(state, id, payload).await)
+    }
+
+    async fn delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
+        let session = state.cache_session(M::table_name()).await?;
+        session.finish(state, self.cached_delete(state, id).await)
+    }
+}
+
+impl<M> CachedMappedRemoteInvokeSet<M>
+where
+    M: Model + Serialize + Send + Sync + 'static,
+{
+    async fn cached_list(
+        &self,
+        state: &AppState,
+        params: HashMap<String, String>,
+    ) -> ApiResult<Value> {
+        self.filterset.validate_json_params(&params)?;
         let force_remote = params
             .get("force_remote")
             .is_some_and(|value| value == "true");
@@ -455,7 +493,7 @@ where
         Ok(self.filterset.apply_json(value, &local_params))
     }
 
-    async fn retrieve(&self, state: &AppState, id: i64) -> ApiResult<Value> {
+    async fn cached_retrieve(&self, state: &AppState, id: i64) -> ApiResult<Value> {
         if let Ok(Some(value)) = local_retrieve::<M>(state, &self.serializer, id).await {
             return Ok(value);
         }
@@ -476,7 +514,7 @@ where
         Ok(value)
     }
 
-    async fn create(&self, state: &AppState, payload: Value) -> ApiResult<Value> {
+    async fn cached_create(&self, state: &AppState, payload: Value) -> ApiResult<Value> {
         let response = with_token(
             state,
             remote_client().post(remote_url(state, self.remote_path)?),
@@ -490,7 +528,7 @@ where
         Ok(value)
     }
 
-    async fn update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
+    async fn cached_update(&self, state: &AppState, id: i64, payload: Value) -> ApiResult<Value> {
         let response = with_token(
             state,
             remote_client().patch(format!(
@@ -508,7 +546,7 @@ where
         Ok(value)
     }
 
-    async fn delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
+    async fn cached_delete(&self, state: &AppState, id: i64) -> ApiResult<Value> {
         let response = with_token(
             state,
             remote_client().delete(format!(
@@ -801,7 +839,10 @@ impl TauriApi {
         for module in apps.iter() {
             module.init(&mut ctx);
         }
-        let (sql, resources) = ctx.into_parts();
+        let (sql, resources, cache_tables) = ctx.into_parts();
+        for table in cache_tables {
+            self.state.register_cache_table(table);
+        }
         self.sql.extend(sql);
         self.resources.extend(
             resources
