@@ -818,11 +818,19 @@ fn normalize_remote_list<M: che_orm::Model>(value: Value, serializer: ModelSeria
     value
 }
 
-#[derive(Debug)]
 pub struct TauriApi {
     state: AppState,
     resources: HashMap<String, RegisteredResource>,
-    sql: Vec<String>,
+    apps: InstalledApps,
+}
+
+impl std::fmt::Debug for TauriApi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TauriApi")
+            .field("state", &self.state)
+            .field("resources", &self.resources)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TauriApi {
@@ -830,43 +838,39 @@ impl TauriApi {
         Self {
             state,
             resources: HashMap::new(),
-            sql: Vec::new(),
+            apps: InstalledApps::new(),
         }
     }
 
+    /// Store modules; schema/resource registration happens only in build.
     pub fn install(mut self, apps: InstalledApps) -> Self {
-        let mut ctx = crate::ModuleContext::new();
-        for module in apps.iter() {
-            module.init(&mut ctx);
-        }
-        let (sql, resources, cache_tables) = ctx.into_parts();
-        for table in cache_tables {
-            self.state.register_cache_table(table);
-        }
-        self.sql.extend(sql);
-        self.resources.extend(
-            resources
-                .into_iter()
-                .map(|resource| (resource.resource.to_string(), resource.invoke_resource)),
-        );
+        self.apps = apps;
         self
     }
 
-    pub async fn initialize(&self) -> ApiResult<()> {
-        let sql = self
-            .sql
-            .iter()
-            .map(|sql| format!("{sql};\n"))
-            .collect::<String>();
-        self.state
-            .db()
-            .raw_transaction(move |connection| connection.execute_batch(&sql))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn build(self) -> ApiResult<Self> {
-        self.initialize().await?;
+    /// Assemble resources and start modules. Database migrations are explicit.
+    pub async fn build(mut self) -> ApiResult<Self> {
+        let mut schema = che_orm::SchemaSet::new();
+        let mut ctx = crate::ModuleContext::new();
+        for module in self.apps.iter() {
+            schema = schema.merge(module.schema());
+            module.init(&mut ctx);
+        }
+        ctx.validate(&schema)?;
+        let (resources, cache_tables) = ctx.into_parts();
+        for table in cache_tables {
+            self.state.register_cache_table(table);
+        }
+        self.resources = resources
+            .into_iter()
+            .map(|resource| (resource.resource.to_string(), resource.invoke_resource))
+            .collect();
+        for module in self.apps.iter() {
+            module.subscribe(&self.state);
+        }
+        for module in self.apps.iter() {
+            module.start(&self.state);
+        }
         Ok(self)
     }
 

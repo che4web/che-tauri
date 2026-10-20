@@ -108,6 +108,10 @@ impl AppModule for UsersModule {
         "users"
     }
 
+    fn schema(&self) -> che_orm::SchemaSet {
+        che_orm::SchemaSet::new().model::<models::User>()
+    }
+
     fn init(&self, ctx: &mut ModuleContext) {
         ctx.resource::<models::User>(
             "users",
@@ -223,7 +227,7 @@ ctx.resource::<models::User>(
 );
 ```
 
-This creates table SQL metadata, registers CRUD invoke handlers and includes the resource in generated TypeScript.
+Declare the model separately in `AppModule::schema()`. This registers CRUD invoke handlers and generated TypeScript metadata; it does not create tables.
 
 Mapped remote REST resource:
 
@@ -255,8 +259,8 @@ ctx.cached_mapped_remote_resource::<models::User>(
 );
 ```
 
-This creates a local cache table and uses cached records before requesting the
-remote API. List requests accept `force_remote: true` to bypass the cache. All
+Declare its local table in `AppModule::schema()` and create it through compiled
+migrations. The resource uses cached records before requesting the remote API. List requests accept `force_remote: true` to bypass the cache. All
 cached actions require an authentication token, including local cache hits.
 
 Cached tables belong to the current remote session. Changing the token, logging
@@ -318,13 +322,24 @@ pub fn run() {
 }
 ```
 
-`TauriApi::build()` initializes registered modules, applies create-table SQL for local resources, and stores invoke resources by resource name.
+`install()` only stores the module list. `build()` collects the declared schemas,
+registers invoke handlers through `init()`, validates registration, then calls all
+`subscribe()` hooks and all `start()` hooks in installation order. Both hooks
+have empty defaults. The same phases are used by `che-rest`.
+
+`build()` performs no schema writes or automatic migrations. Apply compiled
+migrations explicitly before runtime startup. `schema()` describes local/cache
+models with `.model::<M>()` and sync models with `.client_model::<M>()`.
+Remote-only modules can return `SchemaSet::new()`.
+
+This changes the earlier module API: see [AppModule migration](docs/app-modules.md)
+for removed context methods, existing databases and consumer updates.
 
 Use fully qualified paths for commands exported by another crate so Tauri can
 resolve their generated wrapper macros. When using both managed states, register
 `che_tauri::che_api`, `che_tauri::che_model_sync`, and application commands in
 one `generate_handler!` list. `TauriSync` must be opened after explicit compiled
-client migrations; `sync_model` does not add startup CREATE TABLE statements.
+client migrations; resource registration never adds startup CREATE TABLE statements.
 
 ## Frontend Usage
 
@@ -514,6 +529,11 @@ Useful source files:
 
 Runnable Todo server and desktop client: [examples/todo-sync](examples/todo-sync/README.md).
 
+Current protocol 2 grants whole-model access. Objects shared through per-object
+permissions, including grant/revocation delivery, are the
+[planned next stage](../che-rest/docs/OBJECT_SYNC_PLAN.md), **not implemented**
+by `TauriSync`. The Todo example does not demonstrate object-level authorization.
+
 Responsibilities are split across the crates:
 
 | Crate | Responsibility |
@@ -540,20 +560,26 @@ Declare synchronized models with UUID primary keys, `#[orm(sync)]` and stable
 `sync_name` values. Register them in FK parent-first order in app modules:
 
 ```rust,ignore
-fn init(&self, ctx: &mut ModuleContext) {
-    ctx.sync_model::<models::Note>();
+fn schema(&self) -> che_orm::SchemaSet {
+    che_orm::SchemaSet::new().client_model::<models::Note>()
+}
+
+fn init(&self, _ctx: &mut ModuleContext) {
+    // Register invoke resources here if this module has any.
 }
 ```
 
-`sync_model` registers the **client** schema for `makemigrations`, including
-sync service tables. Generate, review and apply compiled migrations before
+`AppModule::schema()` registers the **client** role for `makemigrations`, including
+sync service tables. `InstalledApps::sync_registry()` reads these schemas without
+calling `init()`. Generate, review and apply compiled migrations before
 opening the client. This registration does not run startup CREATE TABLE SQL.
 Existing local/remote resources and their i64 invoke IDs remain separate; expose
 UUID CRUD through application commands calling `TauriSync::save`, `delete` and
 `database`. Do not register the same sync table as a cached remote resource:
 authentication cache invalidation must never clear durable offline edits.
-This separation is currently an application registration requirement; the
-framework does not yet reject overlapping cache/sync table registrations.
+`TauriApi::build()` rejects ordinary local/cached resource tables declared as
+sync models, and local tables missing from the schema. Keep separately configured
+runtimes and related cascade effects isolated as well.
 
 The application supplies a `che_sync::ModelLogTransport`. For the existing REST
 protocol use `che_rest::sync_http::{RestModelTransport, RestResource}` with

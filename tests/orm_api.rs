@@ -1,3 +1,5 @@
+mod common;
+
 use std::collections::HashMap;
 
 use che_orm::{Database, DbEnum, Model};
@@ -82,6 +84,11 @@ impl AppModule for Articles {
     fn name(&self) -> &'static str {
         "articles"
     }
+    fn schema(&self) -> che_orm::SchemaSet {
+        che_orm::SchemaSet::new()
+            .model::<Author>()
+            .model::<Article>()
+    }
     fn init(&self, ctx: &mut ModuleContext) {
         ctx.resource("authors", author_serializer(), FilterSet::new(&[]));
         ctx.resource::<Article>(
@@ -102,11 +109,9 @@ async fn api() -> TauriApi {
         },
         Database::connect_in_memory().await.unwrap(),
     );
-    TauriApi::new(state)
-        .install(InstalledApps::new().add(Articles))
-        .build()
-        .await
-        .unwrap()
+    let apps = InstalledApps::new().add(Articles);
+    common::migrate(state.db(), &apps).await;
+    TauriApi::new(state).install(apps).build().await.unwrap()
 }
 
 fn request(
@@ -127,7 +132,7 @@ fn request(
 #[tokio::test]
 async fn crud_filters_relations_and_new_column_types() {
     let api = api().await;
-    api.initialize().await.unwrap(); // Repeated startup remains idempotent, including indexes.
+    common::migrate(api.state().db(), &InstalledApps::new().add(Articles)).await;
     let author = api
         .dispatch(request(
             "authors",

@@ -1,20 +1,29 @@
-use che_orm::{ColumnType, Model, SchemaSet, SqlCompiler, SqliteDialect, TableSchema};
+use std::sync::Arc;
+
+use che_orm::{ColumnType, MigrationError, Model, ProjectState, SchemaSet};
 use serde::Serialize;
 
-use crate::{FilterSet, ModelSerializer, api::ResourceRegistration};
+use crate::{ApiError, ApiResult, AppState, FilterSet, ModelSerializer, api::ResourceRegistration};
 
-pub trait AppModule {
+pub trait AppModule: Send + Sync + 'static {
     fn name(&self) -> &'static str;
+    /// Database schema only; used without invoking runtime registration.
+    fn schema(&self) -> SchemaSet;
+    /// Declarative invoke registration; may also run during API generation.
     fn init(&self, ctx: &mut ModuleContext);
 
     fn migrations(&self) -> Vec<che_orm::Migration> {
         Vec::new()
     }
+
+    fn subscribe(&self, _state: &AppState) {}
+
+    fn start(&self, _state: &AppState) {}
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct InstalledApps {
-    modules: Vec<Box<dyn AppModule>>,
+    modules: Vec<Arc<dyn AppModule>>,
 }
 
 impl InstalledApps {
@@ -26,12 +35,12 @@ impl InstalledApps {
     where
         M: AppModule + 'static,
     {
-        self.modules.push(Box::new(module));
+        self.modules.push(Arc::new(module));
         self
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &dyn AppModule> {
-        self.modules.iter().map(Box::as_ref)
+        self.modules.iter().map(Arc::as_ref)
     }
 
     pub fn find(&self, name: &str) -> Option<&dyn AppModule> {
@@ -42,15 +51,33 @@ impl InstalledApps {
         self.iter().map(AppModule::name)
     }
 
-    /// Build a protocol-2 client registry in module registration order.
-    /// Call after applying the modules' compiled migrations.
+    /// Collects schema metadata without registering resources or starting modules.
+    pub fn schema(&self) -> SchemaSet {
+        self.iter().fold(SchemaSet::new(), |schema, module| {
+            schema.merge(module.schema())
+        })
+    }
+
+    pub fn migration_state(&self) -> Result<ProjectState, MigrationError> {
+        let schemas: Vec<_> = self
+            .iter()
+            .map(|module| (module.name(), module.schema()))
+            .collect();
+        ProjectState::from_app_schemas(schemas.iter().map(|(name, schema)| (*name, schema)))
+    }
+
+    /// Build a client registry from the declared schemas, without calling init.
     #[cfg(feature = "sync")]
-    pub fn sync_registry(&self) -> crate::ApiResult<che_sync::Registry> {
-        let mut schema = SchemaSet::new();
-        for module in self.iter() {
-            let mut ctx = ModuleContext::new();
-            module.init(&mut ctx);
-            schema = schema.merge(ctx.schemas);
+    pub fn sync_registry(&self) -> ApiResult<che_sync::Registry> {
+        let schema = self.schema();
+        if schema
+            .sync_models()
+            .iter()
+            .any(|model| model.role != che_orm::ModelRole::Client)
+        {
+            return Err(ApiError::bad_request(
+                "Tauri sync models must use the client database role",
+            ));
         }
         Ok(che_sync::Registry::from_schema(&schema)?)
     }
@@ -58,8 +85,7 @@ impl InstalledApps {
 
 #[derive(Default)]
 pub struct ModuleContext {
-    sql: Vec<String>,
-    schemas: SchemaSet,
+    local_tables: Vec<&'static str>,
     api_endpoints: Vec<ApiEndpoint>,
     resources: Vec<ResourceRegistration>,
     cache_tables: Vec<&'static str>,
@@ -101,39 +127,6 @@ impl ModuleContext {
         Self::default()
     }
 
-    /// Register a UUID sync model and its client service schema for compiled
-    /// migrations. This does not create tables or register i64 CRUD handlers.
-    #[cfg(feature = "sync")]
-    pub fn sync_model<M: che_sync::SyncModel>(&mut self) {
-        self.schemas = std::mem::take(&mut self.schemas).client_model::<M>();
-    }
-
-    pub fn model<M>(&mut self)
-    where
-        M: Model,
-    {
-        let compiled = SqlCompiler::<SqliteDialect>::compile_schema(&M::schema());
-        self.sql.push(
-            compiled
-                .table
-                .replacen("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1),
-        );
-        self.sql.extend(
-            compiled
-                .indexes
-                .into_iter()
-                .map(|sql| sql.replacen("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)),
-        );
-        self.schemas = std::mem::take(&mut self.schemas).model::<M>();
-    }
-
-    pub fn create_table<M>(&mut self)
-    where
-        M: Model,
-    {
-        self.model::<M>();
-    }
-
     pub fn resource<M>(
         &mut self,
         resource: &'static str,
@@ -142,7 +135,7 @@ impl ModuleContext {
     ) where
         M: Model + Serialize + Send + Sync + 'static,
     {
-        self.model::<M>();
+        self.local_tables.push(M::table_name());
         let registration = ResourceRegistration::from_model::<M>(resource, serializer, filterset);
         self.api_endpoints.push(ApiEndpoint {
             model_name: rust_type_name::<M>(),
@@ -228,7 +221,7 @@ impl ModuleContext {
             serializer,
             filterset,
         );
-        self.model::<M>();
+        self.local_tables.push(M::table_name());
         self.cache_tables.push(M::table_name());
         self.api_endpoints.push(ApiEndpoint {
             model_name: rust_type_name::<M>(),
@@ -239,20 +232,44 @@ impl ModuleContext {
         self.resources.push(registration);
     }
 
-    pub fn model_schemas(&self) -> &[TableSchema] {
-        self.schemas.tables()
-    }
-
-    pub fn schema(&self) -> &SchemaSet {
-        &self.schemas
-    }
-
     pub fn api_endpoints(&self) -> &[ApiEndpoint] {
         &self.api_endpoints
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<String>, Vec<ResourceRegistration>, Vec<&'static str>) {
-        (self.sql, self.resources, self.cache_tables)
+    pub(crate) fn validate(&self, schema: &SchemaSet) -> ApiResult<()> {
+        schema
+            .validate()
+            .map_err(|error| ApiError::bad_request(format!("invalid app schema: {error:?}")))?;
+        let mut resources = std::collections::HashSet::new();
+        for resource in &self.resources {
+            if !resources.insert(resource.resource) {
+                return Err(ApiError::bad_request(format!(
+                    "duplicate resource: {}",
+                    resource.resource
+                )));
+            }
+        }
+        for table in &self.local_tables {
+            if schema
+                .sync_models()
+                .iter()
+                .any(|model| model.schema.name == *table)
+            {
+                return Err(ApiError::bad_request(format!(
+                    "sync table {table} cannot be used by ordinary local or cached resources"
+                )));
+            }
+            if !schema.tables().iter().any(|model| model.name == *table) {
+                return Err(ApiError::bad_request(format!(
+                    "local table {table} is missing from AppModule::schema()"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<ResourceRegistration>, Vec<&'static str>) {
+        (self.resources, self.cache_tables)
     }
 }
 

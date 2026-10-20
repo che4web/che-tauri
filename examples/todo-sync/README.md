@@ -23,6 +23,11 @@ API слушает `http://127.0.0.1:3007/api/todos/`. База — `server.sqli
 Для демонстрации используется один пользователь с доступом ко всем задачам
 и известный токен `todo-demo-token`. Сервер слушает только loopback.
 
+Это демонстрация whole-model доступа, а не per-object разрешений. Совместный
+доступ разных пользователей, выдача и отзыв доступа —
+[следующий этап протокола](../../../che-rest/docs/OBJECT_SYNC_PLAN.md),
+пока не реализованный в этом примере.
+
 Клиент A, второй терминал:
 
 ```bash
@@ -67,10 +72,15 @@ TODO_CLIENT_DB=client-b.sqlite cargo run -p todo-sync-client --bin todo-sync-cli
 - `model`: UUID-модель `Todo` и ORM-сериализатор, общий для сервера и HTTP-маппинга.
 - `server`: обычный ViewSet с `IsAuthenticated` и `ModelSyncEndpoints`.
   Записи идут через POST/PATCH/DELETE, загрузка — через `/todos/sync/changes/`.
-- `client/src-tauri`: клиентская схема через `ModuleContext::sync_model`,
+- `client/src-tauri`: клиентская схема через `AppModule::schema().client_model`,
   `TauriSync`, HTTP-транспорт из `che-rest` и четыре UUID CRUD-команды.
 - `client/ui`: локальный список и отправка `che_model_sync`. Число шагов одного
   нажатия ограничено; конфликты останавливают цикл и показываются пользователю.
+
+Оба AppModule отдельно описывают схему через `schema()`. Сервер выбирает
+`server_model`, клиент — `client_model`; `init()` отвечает только за обработчики.
+У клиента здесь пустой `init()`: его UUID CRUD-команды зарегистрированы напрямую
+в Tauri handler. Sync-регистр собирается из схем без запуска `init()`.
 
 Клиентские CRUD-команды используют настроенный sync-клиент; кеш удалённых
 ресурсов здесь не участвует. HTTP остаётся в `che-rest`, outbox/merge/курсоры —

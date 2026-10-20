@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -66,6 +68,12 @@ impl AppModule for Resources {
         "test"
     }
 
+    fn schema(&self) -> che_orm::SchemaSet {
+        che_orm::SchemaSet::new()
+            .model::<Item>()
+            .model::<Group>()
+            .model::<Note>()
+    }
     fn init(&self, ctx: &mut ModuleContext) {
         ctx.mapped_remote_resource::<Item>(
             "mapped",
@@ -116,11 +124,9 @@ async fn api(url: &str) -> TauriApi {
         },
         Database::connect_in_memory().await.unwrap(),
     );
-    let api = TauriApi::new(state)
-        .install(InstalledApps::new().add(Resources))
-        .build()
-        .await
-        .unwrap();
+    let apps = InstalledApps::new().add(Resources);
+    common::migrate(state.db(), &apps).await;
+    let api = TauriApi::new(state).install(apps).build().await.unwrap();
     api.set_auth_token("user-A".into());
     api
 }

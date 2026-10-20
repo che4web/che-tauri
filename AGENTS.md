@@ -49,6 +49,17 @@ The root is one library crate. `examples/todo-sync` is an independent Cargo work
 - `Management`: project-local CLI for consuming apps.
 - `TauriSync`: separate managed state for one durable UUID sync database and a supplied transport (`sync` feature).
 
+## AppModule Lifecycle
+
+- Keep the common `che-rest`/`che-tauri` contract: `name`, required pure `schema`, declarative `init`, optional compiled `migrations`, `subscribe` and `start`. Modules are Send + Sync + 'static.
+- `TauriApi::install` only stores/replaces the module list. `build` collects schemas, calls every init, validates resources, then calls every subscribe and every start in installation order. Do not move runtime work back into install or schema discovery.
+- Startup never executes DDL or migrations. Remove assumptions that `resource`/cached registration creates a table. Apply compiled histories explicitly before normal use.
+- `InstalledApps::migration_state` and `sync_registry` use schema only. API generation may call init for resource metadata; init must not start workers, subscribe or mutate the database.
+- `ModuleContext::model`, `create_table`, `sync_model`, `schema`, `model_schemas` and `TauriApi::initialize` were removed. Move persisted model declarations to `AppModule::schema()`. See `docs/app-modules.md` for migration and the existing ewa-mobile consumer.
+- Local and cached tables use `SchemaSet::model`; remote-only resource metadata does not require a local table. Sync models use `client_model`. Preserve existing applied migration operations/checksums when moving declarations.
+- Shared sync infrastructure has logical owner che_sync; makemigrations must include its missing operations in the selected application's compiled history so opening never relies on startup table creation.
+- `tests/module_lifecycle.rs` verifies deferred installation, phase order, schema-only discovery, explicit migrations and invalid/overlapping resource declarations.
+
 ## Resource Registration
 
 Local SQLite-backed resource:
@@ -85,7 +96,7 @@ ctx.raw_remote_resource::<models::User>(
 
 Notes:
 
-- `ctx.resource` creates local table SQL metadata and registers local CRUD handlers.
+- `AppModule::schema()` owns database schemas. `ctx.resource` registers handlers/metadata only; it never creates tables or adds models to migration state.
 - `ctx.mapped_remote_resource` normalizes remote JSON through serializers and supports local-only JSON filters.
 - `ctx.raw_remote_resource` proxies remote JSON mostly unchanged but still emits generated TS metadata.
 - `ctx.remote_resource` currently delegates to mapped remote resource behavior.
@@ -207,15 +218,17 @@ Before making broad API changes, inspect current usage in `../ewa-mobile/src-tau
 
 ## Optional Synchronization
 
+- Current protocol 2 grants whole-model access. The next requirement is shared objects with per-object permissions; grant/revocation delivery and offline-write handling after access loss are planned in `../che-rest/docs/OBJECT_SYNC_PLAN.md`, not implemented. Do not imply that TauriSync or the Todo example already supports them. One shared UUID/revision must remain consistent across users.
+
 - Enable `sync` for `TauriSync`, `che_model_sync` and generated `sync.ts`.
-- `ModuleContext::sync_model` registers protocol-2 client schemas for compiled migrations; it must not emit startup table creation SQL. `InstalledApps::sync_registry` preserves module registration order (FK parents first).
+- Declare sync models in `AppModule::schema()` with `SchemaSet::client_model`. `InstalledApps::sync_registry` reads schemas without running init and preserves module order (FK parents first).
 - Sync models have UUID IDs. Existing `che_api` resources retain i64 IDs; application UUID CRUD commands call the managed sync client's `save`, `delete` or configured `database` handle.
 - `che-sync` owns persistence, capture, outbox, journals and merge. Supply a `ModelLogTransport`; reuse `che-rest/sync-http` for HTTP rather than duplicating its protocol in Tauri.
 - Keep durable sync databases separate from remote response caches. Credential/cache invalidation must not clear pending edits or silently change their server/account. One runtime per database; clones share its locks.
 - Run `cargo test --features sync` as well as default tests. HTTP tests need ephemeral loopback ports. The sync tests cover request replay after reopening, conflict resolution, UUID/record input validation and journal pagination.
 - Register exported commands with fully qualified paths in `tauri::generate_handler!`, e.g. `che_tauri::che_model_sync` / `che_tauri::che_api`. A bare imported function name may leave Tauri's generated command macros out of scope.
 - `AppState` token/config changes affect ordinary remote resources only. The application's sync transport owns its own credentials; renew them for the same server/account without dropping pending data.
-- Cache/sync table overlap is currently forbidden by the documented application contract, not a registration-time check. Do not claim that the framework already rejects this configuration. Cache invalidation runs raw deletes and must never include sync tables.
+- `TauriApi::build()` rejects ordinary local/cached resource tables that are declared sync models, as well as missing local schema registrations and duplicate resources. Separately configured runtimes and related cascade effects still require application isolation; cache invalidation must never include durable sync data.
 - `pull` downloads one page per model. `flush` sends at most one coalesced record per model, retrying immutable submitted payloads first. Keep UI cycles bounded and stop on `blocked`, conflicts or rejections; no implicit background loop exists.
 - Keep revisions and integer protocol values as decimal strings in frontend data. UUIDs are strings. The custom `record` resolution requires an explicit `record` field; null means deletion.
 

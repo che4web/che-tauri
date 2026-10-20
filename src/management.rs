@@ -115,20 +115,16 @@ impl Management {
             }
         }
         let old_state = graph.replay(ProjectState::default())?;
-        let schemas = self
-            .apps
-            .iter()
-            .map(|module| (module.name(), app_schema(module)))
-            .collect::<Vec<_>>();
-        let mut desired =
-            ProjectState::from_app_schemas(schemas.iter().map(|(name, schema)| (*name, schema)))?;
+        let mut desired = self.apps.migration_state()?;
         for object in old_state.objects() {
             desired.add_schema_object(object.clone())?;
         }
         let changes = old_state
             .diff(&desired)?
             .into_iter()
-            .filter(|change| change.app() == app)
+            // Shared sync tables have the logical owner che_sync, but their
+            // operations must be shipped in an installed application's history.
+            .filter(|change| change.app() == app || change.app() == "che_sync")
             .collect::<Vec<_>>();
 
         if changes.is_empty() {
@@ -250,12 +246,6 @@ impl Management {
         endpoints.sort_by(|left, right| left.model_name.cmp(&right.model_name));
         endpoints
     }
-}
-
-fn app_schema(module: &dyn crate::AppModule) -> che_orm::SchemaSet {
-    let mut ctx = ModuleContext::new();
-    module.init(&mut ctx);
-    ctx.schema().clone()
 }
 
 fn models_ts(endpoints: &[ApiEndpoint]) -> String {
@@ -650,6 +640,10 @@ impl AppModule for {module_type} {{
         "{name}"
     }}
 
+    fn schema(&self) -> che_orm::SchemaSet {{
+        che_orm::SchemaSet::new().model::<models::{model}>()
+    }}
+
     fn init(&self, ctx: &mut ModuleContext) {{
         ctx.resource::<models::{model}>(
             "{name}",
@@ -777,6 +771,9 @@ mod tests {
         fn name(&self) -> &'static str {
             "notes"
         }
+        fn schema(&self) -> che_orm::SchemaSet {
+            che_orm::SchemaSet::new().model::<Note>()
+        }
         fn init(&self, ctx: &mut ModuleContext) {
             static FIELDS: &[Field] = &[
                 Field::new("id").read_only(),
@@ -790,7 +787,7 @@ mod tests {
             if !self.compiled {
                 return Vec::new();
             }
-            let desired = ProjectState::from_app_schema("notes", &app_schema(self));
+            let desired = ProjectState::from_app_schema("notes", &self.schema());
             vec![Migration::new(
                 MigrationId {
                     app: "notes".into(),
@@ -874,10 +871,72 @@ mod tests {
         assert!(model.contains("serde::Serialize"));
         assert!(model.contains("#[orm(table = \"users\")]"));
         assert!(model.contains("#[orm(primary_key)]"));
+        let module = fs::read_to_string(temp.0.join("users/mod.rs")).unwrap();
+        assert!(module.contains("fn schema(&self) -> che_orm::SchemaSet"));
+        assert!(module.contains(".model::<models::User>()"));
         assert!(
             fs::read_to_string(temp.0.join("users/mod.rs"))
                 .unwrap()
                 .contains("migrations::migrations()")
         );
+    }
+    #[test]
+    fn makemigrations_reads_schema_without_initializing_resources() {
+        struct SchemaOnly;
+        impl AppModule for SchemaOnly {
+            fn name(&self) -> &'static str {
+                "notes"
+            }
+            fn schema(&self) -> che_orm::SchemaSet {
+                che_orm::SchemaSet::new().model::<Note>()
+            }
+            fn init(&self, _ctx: &mut ModuleContext) {
+                panic!("makemigrations ran init");
+            }
+        }
+        let temp = TempDir::new();
+        Management::new(InstalledApps::new().add(SchemaOnly))
+            .makemigrations("notes", temp.0.clone(), "initial")
+            .unwrap();
+        let source = fs::read_to_string(temp.0.join("notes/migrations/0001_initial.rs")).unwrap();
+        assert!(source.contains("CreateModel"));
+        assert!(source.contains("notes"));
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn sync_migrations_include_shared_runtime_tables_without_running_init() {
+        #[derive(che_orm::Model)]
+        #[orm(table = "sync_tasks", sync, sync_name = "tasks.task")]
+        struct Task {
+            #[orm(primary_key)]
+            id: che_orm::Uuid,
+            title: String,
+        }
+        struct Tasks;
+        impl AppModule for Tasks {
+            fn name(&self) -> &'static str {
+                "tasks"
+            }
+            fn schema(&self) -> che_orm::SchemaSet {
+                che_orm::SchemaSet::new().client_model::<Task>()
+            }
+            fn init(&self, _ctx: &mut ModuleContext) {
+                panic!("makemigrations ran init");
+            }
+        }
+        let temp = TempDir::new();
+        Management::new(InstalledApps::new().add(Tasks))
+            .makemigrations("tasks", temp.0.clone(), "initial")
+            .unwrap();
+        let source = fs::read_to_string(temp.0.join("tasks/migrations/0001_initial.rs")).unwrap();
+        for table in [
+            "sync_tasks",
+            "_sync_meta",
+            "_sync_server_sync_tasks",
+            "_sync_outbox",
+        ] {
+            assert!(source.contains(table), "missing migration table {table}");
+        }
     }
 }

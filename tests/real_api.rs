@@ -1,3 +1,5 @@
+mod common;
+
 use std::collections::HashMap;
 
 use che_orm::{Database, Model};
@@ -20,6 +22,9 @@ struct Balances;
 impl AppModule for Balances {
     fn name(&self) -> &'static str {
         "balances"
+    }
+    fn schema(&self) -> che_orm::SchemaSet {
+        che_orm::SchemaSet::new().model::<Balance>()
     }
     fn init(&self, ctx: &mut ModuleContext) {
         static FIELDS: &[Field] = &[
@@ -57,11 +62,9 @@ async fn real_crud_filters_and_validation() {
         },
         Database::connect_in_memory().await.unwrap(),
     );
-    let api = TauriApi::new(state)
-        .install(InstalledApps::new().add(Balances))
-        .build()
-        .await
-        .unwrap();
+    let apps = InstalledApps::new().add(Balances);
+    common::migrate(state.db(), &apps).await;
+    let api = TauriApi::new(state).install(apps).build().await.unwrap();
     let created = api
         .dispatch(request(
             ApiAction::Create,

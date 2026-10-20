@@ -11,9 +11,10 @@ impl AppModule for TodoApp {
     fn name(&self) -> &'static str {
         "todo"
     }
-    fn init(&self, ctx: &mut ModuleContext) {
-        ctx.sync_model::<Todo>();
+    fn schema(&self) -> che_orm::SchemaSet {
+        todo_sync_model::client_schema()
     }
+    fn init(&self, _ctx: &mut ModuleContext) {}
     fn migrations(&self) -> Vec<che_orm::Migration> {
         vec![initial::migration()]
     }

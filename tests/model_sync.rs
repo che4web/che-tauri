@@ -32,9 +32,10 @@ impl AppModule for Notes {
     fn name(&self) -> &'static str {
         "notes"
     }
-    fn init(&self, ctx: &mut ModuleContext) {
-        ctx.sync_model::<Note>();
+    fn schema(&self) -> SchemaSet {
+        SchemaSet::new().client_model::<Note>()
     }
+    fn init(&self, _ctx: &mut ModuleContext) {}
 }
 
 async fn database(client: bool) -> (Database, Registry) {
