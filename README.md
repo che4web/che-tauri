@@ -472,6 +472,8 @@ Useful source files:
 
 ## Offline synchronization (protocol 2)
 
+Runnable Todo server and desktop client: [examples/todo-sync](examples/todo-sync/README.md).
+
 Enable `che-tauri = { path = "../che-tauri", features = ["sync"] }`.
 `TauriSync` integrates the existing `che-sync::ModelLogClient`; it exposes
 `pull`, `flush`, `sync_once`, `conflicts` and `resolve` to Rust and Tauri invoke.
@@ -507,7 +509,7 @@ Use the server's ORM serializer type for each `RestResource` mapping.
 `reqwest`, version `0.12`, features `json,rustls-tls`, default features disabled).
 
 ```rust,ignore
-use che_tauri::{TauriSync, che_model_sync};
+use che_tauri::TauriSync;
 use che_rest::sync_http::{RestModelTransport, RestResource};
 
 // `database` has already had the installed modules' compiled migrations applied.
@@ -522,7 +524,7 @@ let sync = TauriSync::open(database, apps.sync_registry()?, transport).await?;
 
 tauri::Builder::default()
     .manage(sync)
-    .invoke_handler(tauri::generate_handler![che_model_sync])
+    .invoke_handler(tauri::generate_handler![che_tauri::che_model_sync])
     // Add che_api and application UUID CRUD commands to this same handler list.
     .run(tauri::generate_context!())?;
 ```

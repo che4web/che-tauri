@@ -1,0 +1,18 @@
+[package]
+name = "todo-sync-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+axum = "0.8"
+che-orm.workspace = true
+che-rest.workspace = true
+che-sync.workspace = true
+todo-sync-model.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+che-tauri.workspace = true
+todo-sync-client = { path = "../client/src-tauri", default-features = false }
+serde_json.workspace = true

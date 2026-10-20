@@ -1,0 +1,27 @@
+[package]
+name = "todo-sync-client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+default-run = "todo-sync-client"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build"]
+
+[dependencies]
+che-orm.workspace = true
+che-rest.workspace = true
+che-tauri.workspace = true
+todo-sync-model.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tauri = { version = "2", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
+[[bin]]
+name = "todo-sync-client"
+required-features = ["desktop"]
+

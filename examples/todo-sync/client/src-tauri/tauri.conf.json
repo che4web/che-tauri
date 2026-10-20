@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Todo Sync",
+  "version": "0.1.0",
+  "identifier": "com.che.todo-sync",
+  "build": { "frontendDist": "../ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "label": "main", "title": "Todo · che-tauri", "width": 700, "height": 720, "minWidth": 420, "minHeight": 480 }],
+    "security": { "csp": "default-src 'self'; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost" }
+  },
+  "bundle": { "active": false }
+}
+

@@ -1,0 +1,3 @@
+/target
+/client/src-tauri/gen/
+*.sqlite*

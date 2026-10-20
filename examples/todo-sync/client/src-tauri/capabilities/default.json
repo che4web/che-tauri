@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Local Todo window; server access is handled by the Rust transport",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

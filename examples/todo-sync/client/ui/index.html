@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Todo Sync</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><span class="eyebrow">CHE-TAURI · OFFLINE FIRST</span><h1>Мои задачи<span> / Todo</span></h1></div>
+      <button id="sync" type="button" class="primary">↻ Синхронизировать</button>
+    </header>
+    <p class="intro">Работайте без сети. Отправьте изменения, когда сервер снова доступен.</p>
+    <div id="status" role="status" aria-live="polite">Открываем локальную базу…</div>
+    <form id="create">
+      <label class="sr-only" for="title">Название задачи</label>
+      <input id="title" placeholder="Что нужно сделать?" maxlength="200" required autocomplete="off">
+      <button type="submit" class="primary">Добавить</button>
+    </form>
+    <div class="list-heading"><h2>Задачи</h2><span id="count"></span></div>
+    <ul id="todos" aria-label="Список задач"></ul>
+    <p id="empty" hidden>Пока пусто. Добавьте первую задачу — интернет не нужен.</p>
+    <section id="conflicts" hidden><h2>Нужно выбрать версию</h2><div id="conflict-list"></div></section>
+    <footer>SQLite на устройстве · UUID · журнал изменений на сервере</footer>
+  </main>
+</body>
+</html>
