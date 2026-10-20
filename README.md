@@ -2,7 +2,14 @@
 
 Tauri invoke API layer for `che-orm` applications.
 
-`che-tauri` mirrors the app/module/serializer/filter architecture from `che-rest`, but exposes model resources through one Tauri command instead of HTTP routes. It supports local SQLite resources, remote REST-backed resources, generated TypeScript clients, project-local migrations, and token-based remote requests.
+`che-tauri` mirrors the app/module/serializer/filter architecture from `che-rest`.
+`che_api` exposes local SQLite resources and remote REST resources with i64 IDs.
+The optional `sync` feature adds a separate `che_model_sync` command for durable
+offline synchronization of UUID models. Applications can add their own Tauri
+commands and generate TypeScript clients for the framework APIs.
+
+For a complete server and desktop client, start with
+[the Todo example](examples/todo-sync/README.md).
 
 ## Features
 
@@ -22,13 +29,19 @@ Use it from an app crate with path dependencies:
 
 ```toml
 [dependencies]
-che-orm = "0.3"
+che-orm = { version = "0.3", path = "../../che-orm" }
 che-tauri = { path = "../../che-tauri" }
 tauri = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ```
+
+The checked-out framework uses sibling path dependencies. Keep direct application
+dependencies on the same `che-orm` checkout so model and database types come from
+one crate instance. Alternatively import ORM types through `che_tauri::che_orm`.
+Add `features = ["sync"]` to the `che-tauri` dependency for offline synchronization;
+ordinary resource CRUD does not require that feature.
 
 ## Configuration
 
@@ -131,8 +144,9 @@ JSON byte arrays.
 `f64` and `Option<f64>` fields use SQLite `REAL`, JSON/TypeScript numbers and
 numeric filters; remote cache writes preserve fractional values.
 UUID fields use JSON/TypeScript strings and support exact filters. Invoke resource
-IDs and related serializer IDs remain `i64`; UUID primary keys are not supported
-by the invoke request format.
+IDs and related serializer IDs remain `i64` in `che_api`. Synchronized UUID
+models use `TauriSync` and application-owned CRUD commands, as shown in the
+[Todo client](examples/todo-sync/client/src-tauri/src/main.rs).
 `AppState::from_config_file` accepts SQLite file paths, `file:` URIs and the
 `sqlite://...` configuration syntax. Query parameters are passed to SQLite:
 `mode=ro` opens read-only, `mode=rw` requires an existing file, and `mode=rwc`
@@ -283,7 +297,7 @@ delete   DELETE <remote_path>/<id>/
 Register `che_api` and manage a built `TauriApi` instance:
 
 ```rust
-use che_tauri::{AppState, TauriApi, che_api};
+use che_tauri::{AppState, TauriApi};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -298,13 +312,19 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(api)
-        .invoke_handler(tauri::generate_handler![che_api])
+        .invoke_handler(tauri::generate_handler![che_tauri::che_api])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 ```
 
 `TauriApi::build()` initializes registered modules, applies create-table SQL for local resources, and stores invoke resources by resource name.
+
+Use fully qualified paths for commands exported by another crate so Tauri can
+resolve their generated wrapper macros. When using both managed states, register
+`che_tauri::che_api`, `che_tauri::che_model_sync`, and application commands in
+one `generate_handler!` list. `TauriSync` must be opened after explicit compiled
+client migrations; `sync_model` does not add startup CREATE TABLE statements.
 
 ## Frontend Usage
 
@@ -439,32 +459,52 @@ src/generated/
   api_client.ts
   models.ts
   api.ts
+  sync.ts          # only when the management binary enables feature "sync"
 ```
+
+`sync.ts` exports `modelSync` and typed status/conflict/resolution messages.
+Its source template is `src/sync_client.ts`; ordinary resource API templates
+live in `src/management.rs`. Update these sources and regenerate clients rather
+than editing application files under `generated/`.
 
 ## Development
 
 Run checks from this library directory:
 
 ```bash
-cargo fmt
+cargo fmt --check
 cargo check
 cargo test
+cargo check --features sync
+cargo test --features sync
+cargo clippy --all-targets --features sync
+```
+
+HTTP tests bind ephemeral loopback ports. The Todo example is a separate Cargo
+workspace, so the commands above do not build or test it. Verify it separately:
+
+```bash
+cargo check --manifest-path examples/todo-sync/Cargo.toml --workspace
+cargo test --manifest-path examples/todo-sync/Cargo.toml -p todo-sync-server -p todo-sync-client --no-default-features
+cargo fmt --manifest-path examples/todo-sync/Cargo.toml --all --check
 ```
 
 Useful source files:
 
 - `src/lib.rs`: public exports.
-- `src/api.rs`: invoke dispatch, local/remote resource implementations, generated client template.
+- `src/api.rs`: invoke dispatch and local/remote resource implementations.
 - `src/module.rs`: app modules, resource registration and API metadata.
 - `src/serializer.rs`: serializer fields and JSON validation/normalization.
 - `src/filters.rs`: local filters, remote filter mapping and ordering.
 - `src/management.rs`: CLI commands, migrations and TypeScript generation.
 - `src/state.rs`: app state, database and auth token storage.
 - `src/config.rs`: TOML config types.
+- `src/sync.rs`: optional managed synchronization state, command and invoke DTOs.
+- `src/sync_client.ts`: canonical TypeScript synchronization client template.
 
 ## Notes
 
-- Resource models require `Model + serde::Serialize + Send + Sync + 'static`; `che-orm` uses `i64` primary keys.
+- Ordinary resource models require `Model + serde::Serialize + Send + Sync + 'static` and i64 IDs for `che_api`; synchronized models use UUID IDs.
 - Remote resources still require model metadata so serializers, filters and generated TypeScript can be derived.
 - `raw_remote_resource` and `mapped_remote_resource` do not create local SQLite tables.
 - Generated TypeScript should be regenerated from metadata rather than edited by hand.
@@ -473,6 +513,20 @@ Useful source files:
 ## Offline synchronization (protocol 2)
 
 Runnable Todo server and desktop client: [examples/todo-sync](examples/todo-sync/README.md).
+
+Responsibilities are split across the crates:
+
+| Crate | Responsibility |
+| --- | --- |
+| `che-orm` | Models, queries, transactions, role-specific schemas and compiled migrations |
+| `che-sync-protocol` | Transport-independent mutation, journal and conflict messages |
+| `che-sync` | Capture, current/shadow data, immutable outbox, cursors and merge |
+| `che-rest` | Server REST endpoints and the protocol-2 HTTP transport |
+| `che-tauri` | Managed sync state, invoke commands and frontend client generation |
+
+The sync integration accepts any `ModelLogTransport`. Existing ordinary remote
+resources still use `che-tauri`'s REST proxy implementation; their cache is
+separate from durable synchronized data.
 
 Enable `che-tauri = { path = "../che-tauri", features = ["sync"] }`.
 `TauriSync` integrates the existing `che-sync::ModelLogClient`; it exposes
@@ -498,6 +552,8 @@ Existing local/remote resources and their i64 invoke IDs remain separate; expose
 UUID CRUD through application commands calling `TauriSync::save`, `delete` and
 `database`. Do not register the same sync table as a cached remote resource:
 authentication cache invalidation must never clear durable offline edits.
+This separation is currently an application registration requirement; the
+framework does not yet reject overlapping cache/sync table registrations.
 
 The application supplies a `che_sync::ModelLogTransport`. For the existing REST
 protocol use `che_rest::sync_http::{RestModelTransport, RestResource}` with
@@ -555,6 +611,8 @@ Resolution strategies are `local`, `remote`, and `record` with typed protocol
 values (or `record: null` for deletion). Integer values and revisions are decimal
 strings to preserve i64 precision; record values distinguish SQL NULL from JSON
 null. UUIDs are strings. Errors use the usual `{ code, detail }` shape.
+The `record` strategy requires an explicit `record` property: a missing property
+is invalid; an explicit `null` chooses deletion.
 
 No background loop starts implicitly. Pull downloads one page per model; repeat
 while `has_more` is true. Flush sends at most one coalesced record per model and
