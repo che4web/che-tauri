@@ -2,6 +2,7 @@
 const invoke = window.__TAURI__.core.invoke;
 const $ = (id) => document.getElementById(id);
 let busy = false;
+let objectMode = false;
 
 function status(message, error = false) {
   $("status").textContent = message;
@@ -22,6 +23,8 @@ async function syncRequest(request) {
 }
 
 async function refresh() {
+  objectMode = await invoke("todo_object_mode");
+  const access = objectMode ? (await syncRequest({ action: "object_access" })).data : [];
   const todos = await invoke("todo_list");
   $("count").textContent = `${todos.filter((todo) => !todo.done).length} осталось / ${todos.length} всего`;
   $("empty").hidden = todos.length > 0;
@@ -33,6 +36,8 @@ async function refresh() {
     check.type = "checkbox";
     check.checked = todo.done;
     check.setAttribute("aria-label", `Выполнено: ${todo.title}`);
+    const permissions = access.find((item) => item.id === todo.id);
+    if (permissions && (!permissions.rights.change || permissions.status !== "active")) { check.disabled = true; check.dataset.locked = "true"; }
     check.onchange = () => run(async () => {
       await invoke("todo_update", { id: todo.id, done: check.checked });
       status("Сохранено на устройстве. Нажмите «Синхронизировать», чтобы отправить изменения.");
@@ -64,11 +69,48 @@ async function refresh() {
       // Keep the editor until submit; this action needs no database refresh.
       return false;
     });
-    row.append(check, title, edit, button("Удалить", async () => {
+    if (permissions && (!permissions.rights.change || permissions.status !== "active")) { edit.disabled = true; edit.dataset.locked = "true"; }
+    const remove = button("Удалить", async () => {
       await invoke("todo_delete", { id: todo.id });
       status("Задача удалена на устройстве. Изменение ожидает синхронизации.");
-    }, "delete"));
+    }, "delete");
+    if (permissions && (!permissions.rights.delete || permissions.status !== "active")) { remove.disabled = true; remove.dataset.locked = "true"; }
+    row.append(check, title, edit, remove);
     $("todos").append(row);
+  }
+  const retained = access.filter((item) => item.status !== "active" || !item.rights.change);
+  $("object-access").hidden = retained.length === 0;
+  $("object-access-list").replaceChildren();
+  for (const item of retained) {
+    const card = document.createElement("div");
+    card.className = "conflict";
+    const label = document.createElement("p");
+    const names = { revoked: "Доступ отозван", deleted: "Объект удалён", review: "Правки ожидают вашего решения", discarded: "Локальные данные удалены", active: "Только чтение" };
+    label.textContent = `${names[item.status] || item.status}: ${item.id}${item.submitted ? " · исход отправки пока неизвестен" : ""}`;
+    card.append(label);
+    if (item.has_draft) {
+      card.append(button("Показать сохранённые правки", async () => {
+        const result = await syncRequest({ action: "retained_draft", model: item.model, id: item.id });
+        const preview = document.createElement("pre");
+        preview.textContent = JSON.stringify(result.data, null, 2);
+        card.append(preview);
+        return false;
+      }));
+    }
+    if (item.status === "review" && item.rights.read && item.rights.change) {
+      card.append(button("Разрешить отправку моих правок", async () => {
+        await syncRequest({ action: "resume_object", model: item.model, id: item.id });
+        status("Правки подтверждены. Нажмите «Синхронизировать» для отправки.");
+      }));
+    }
+    if (!item.rights.read && !item.submitted && item.status !== "discarded") {
+      card.append(button("Удалить сохранённую копию", async () => {
+        if (!window.confirm("Удалить локальную копию и её неотправленные правки?")) return false;
+        await syncRequest({ action: "discard_retained_draft", model: item.model, id: item.id });
+        status("Локальная копия удалена.");
+      }, "delete"));
+    }
+    $("object-access-list").append(card);
   }
   const response = await syncRequest({ action: "conflicts" });
   $("conflicts").hidden = response.data.length === 0;
@@ -103,7 +145,7 @@ async function run(action) {
     try { await refresh(); } catch (_) { /* Keep the original error visible. */ }
   } finally {
     busy = false;
-    document.querySelectorAll("button, input").forEach((node) => { node.disabled = false; });
+    document.querySelectorAll("button, input").forEach((node) => { node.disabled = node.dataset.locked === "true"; });
   }
 }
 
@@ -126,7 +168,7 @@ $("sync").onclick = () => run(async () => {
     sent += report.accepted_operations;
     received += report.received_changes;
     if (report.blocked || report.conflicts || report.rejected_operations) {
-      status("Есть конфликт или отклонённое изменение. Выберите версию ниже.", true);
+      status("Есть конфликт, отзыв доступа или правки, требующие решения. Посмотрите панели ниже.", true);
       return;
     }
     if (!report.has_more && report.accepted_operations === 0 && report.received_changes === 0) {

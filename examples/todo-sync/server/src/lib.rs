@@ -7,6 +7,7 @@ use che_sync::Registry;
 use todo_sync_model::{Todo, TodoSerializer, server_schema};
 
 mod initial;
+pub mod shared;
 
 pub const DEMO_TOKEN: &str = "todo-demo-token";
 

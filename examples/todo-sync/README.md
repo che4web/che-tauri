@@ -146,3 +146,76 @@ node --check client/ui/app.js
 `cargo check` и `cargo build` с обычными features проверяют также desktop-бинарник,
 Tauri-контекст, иконку и регистрацию invoke-команд. Они не открывают окно и не
 проверяют UI вручную — для этого пройдите сценарии выше с двумя клиентами.
+
+## Совместный доступ: отдельный режим протокола 3
+
+Этот режим включается явно. Обычные `migrate`, `serve` и запуск клиента без
+`TODO_OBJECT_ACCOUNT` сохраняют протокол 2. Начальные миграции не изменены.
+Для первой проверки используйте отдельные файлы БД:
+
+```bash
+TODO_SERVER_DB=shared-server.sqlite cargo run -p todo-sync-server -- migrate-objects
+TODO_SERVER_DB=shared-server.sqlite cargo run -p todo-sync-server -- serve-objects
+```
+
+Сервер создаёт демонстрационные аккаунты `alice` / токен `todo-alice` и
+`bob` / токен `todo-bob`. Каждый может создавать задачи, а создатель получает
+явно объявленные права на свою задачу. Парольный вход в этом примере не настроен.
+
+Клиент Alice, отдельный терминал:
+
+```bash
+TODO_CLIENT_DB=shared-alice.sqlite cargo run -p todo-sync-client --bin todo-client-db -- migrate-objects
+TODO_CLIENT_DB=shared-alice.sqlite TODO_OBJECT_ACCOUNT=alice TODO_SYNC_TOKEN=todo-alice cargo run -p todo-sync-client
+```
+
+Клиент Bob:
+
+```bash
+TODO_CLIENT_DB=shared-bob.sqlite cargo run -p todo-sync-client --bin todo-client-db -- migrate-objects
+TODO_CLIENT_DB=shared-bob.sqlite TODO_OBJECT_ACCOUNT=bob TODO_SYNC_TOKEN=todo-bob cargo run -p todo-sync-client
+```
+
+Сначала синхронизируйте пустые клиенты, чтобы получить разрешение создания.
+Создайте задачу Alice и отправьте её. UUID виден в ответе API и в
+`SELECT id FROM todos`; в SQLite UUID хранится BLOB, для CLI используйте
+каноническую строку UUID (её также можно получить через GET API с токеном Alice):
+
+```bash
+curl -H 'Authorization: Token todo-alice' http://127.0.0.1:3007/api/todos/
+```
+
+Доверенные серверные management-команды выдают и отзывают `view/change/delete`:
+
+```bash
+TODO_SERVER_DB=shared-server.sqlite cargo run -p todo-sync-server -- grant UUID bob
+TODO_SERVER_DB=shared-server.sqlite cargo run -p todo-sync-server -- revoke UUID bob
+```
+
+После `grant` и синхронизации Bob видит тот же UUID. Изменения двух аккаунтов
+сливаются по общей ревизии. При `revoke` задача исчезает из обычного списка Bob;
+копия Alice продолжает работать. Панель «Доступ и сохранённые правки» показывает
+отзыв и неизвестный исход уже отправленного запроса. Неотправленные правки можно
+явно посмотреть или удалить. После повторной выдачи доступа сохранённый черновик
+требует кнопки «Разрешить отправку моих правок». Удалить копию с неизвестным
+исходом отправки нельзя — сначала завершите повтор запроса.
+
+При переходе **существующей** клиентской БД сначала завершите отправленные
+операции протокола 2 исходным клиентом и сервером. Затем явно примените новую
+миграцию и измените версию, указав тот же API base URL и аккаунт, которые будут
+использоваться клиентом:
+
+```bash
+TODO_CLIENT_DB=client-a.sqlite cargo run -p todo-sync-client --bin todo-client-db -- migrate-objects
+TODO_CLIENT_DB=client-a.sqlite cargo run -p todo-sync-client --bin todo-client-db -- upgrade-objects http://127.0.0.1:3007/api alice
+```
+
+Операции с неизвестным исходом блокируют upgrade; payload, UUID, replica ID и
+черновики не сбрасываются. Серверу также нужны явная `migrate-objects` и
+назначения ACL существующим задачам. Запуск сервера не выполняет backfill.
+
+Контракт и границы первой реализации:
+[object-sync.md](../../../che-rest/docs/object-sync.md). Лента сверяет всю
+модель на каждый запрос. Связанные проекции и адресные WebSocket-сигналы пока
+не поддержаны. HTTP-тест `server/tests/shared_objects.rs` проверяет двух аккаунтов,
+отзыв, повторную выдачу, сохранение черновика и frozen follow-up миграции.

@@ -25,5 +25,8 @@ pub use che_orm;
 #[cfg(feature = "sync")]
 pub use che_sync;
 #[cfg(feature = "sync")]
-pub use sync::{SyncRequest, SyncResolution, SyncResponse, SyncStatus, TauriSync, che_model_sync};
+pub use sync::{
+    ObjectSyncSchema, SyncRequest, SyncResolution, SyncResponse, SyncStatus, TauriSync,
+    che_model_sync,
+};
 mod database;

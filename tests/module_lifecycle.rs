@@ -272,4 +272,49 @@ mod sync {
             assert!(error.detail.contains("sync table sync_notes"));
         }
     }
+    #[derive(Model, serde::Serialize)]
+    #[orm(table = "_sync_object_access")]
+    struct AccessAlias {
+        #[orm(primary_key)]
+        id: i64,
+        title: String,
+    }
+    struct InternalAlias {
+        cached: bool,
+    }
+    impl AppModule for InternalAlias {
+        fn name(&self) -> &'static str {
+            "invalid_cache"
+        }
+        fn schema(&self) -> SchemaSet {
+            SchemaSet::new().model::<AccessAlias>()
+        }
+        fn init(&self, ctx: &mut ModuleContext) {
+            if self.cached {
+                ctx.cached_mapped_remote_resource::<AccessAlias>(
+                    "access",
+                    "/access/",
+                    ModelSerializer::new(FIELDS),
+                    FilterSet::new(&[]),
+                );
+            } else {
+                ctx.resource::<AccessAlias>(
+                    "access",
+                    ModelSerializer::new(FIELDS),
+                    FilterSet::new(&[]),
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn object_delivery_infrastructure_cannot_be_registered_as_a_cache_or_resource() {
+        for cached in [false, true] {
+            let error = TauriApi::new(state().await)
+                .install(InstalledApps::new().add(InternalAlias { cached }))
+                .build()
+                .await
+                .unwrap_err();
+            assert!(error.detail.contains("sync table _sync_object_access"));
+        }
+    }
 }

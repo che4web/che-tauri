@@ -4253,6 +4253,7 @@ name = "todo-sync-model"
 version = "0.1.0"
 dependencies = [
  "che-orm",
+ "che-rest",
  "serde",
 ]
 

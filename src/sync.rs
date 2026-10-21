@@ -23,6 +23,19 @@ pub enum SyncRequest {
     Flush,
     SyncOnce,
     Conflicts,
+    ObjectAccess,
+    RetainedDraft {
+        model: String,
+        id: Uuid,
+    },
+    ResumeObject {
+        model: String,
+        id: Uuid,
+    },
+    DiscardRetainedDraft {
+        model: String,
+        id: Uuid,
+    },
     Resolve {
         model: String,
         id: Uuid,
@@ -57,6 +70,8 @@ impl From<SyncResolution> for Resolution {
 pub enum SyncResponse {
     Report(SyncStatus),
     Conflicts(Vec<Conflict>),
+    ObjectAccess(Vec<che_sync::object_log::ObjectStatus>),
+    RetainedDraft(Option<Record>),
     Resolved,
 }
 
@@ -125,6 +140,20 @@ impl TauriSync {
         ))
     }
 
+    /// Explicit object-delivery mode. Existing v2 databases are not upgraded here.
+    pub async fn open_objects<T: ModelLogTransport + 'static>(
+        database: Database,
+        registry: Registry,
+        server: impl Into<String>,
+        account: impl Into<String>,
+        transport: T,
+    ) -> ApiResult<Self> {
+        Ok(Self::new(
+            ModelLogClient::open_objects(database, registry, server, account).await?,
+            transport,
+        ))
+    }
+
     pub fn new<T: ModelLogTransport + 'static>(client: ModelLogClient, transport: T) -> Self {
         Self::from_engine(client.engine(transport))
     }
@@ -185,6 +214,20 @@ impl TauriSync {
             SyncRequest::Flush => Ok(SyncResponse::Report(self.flush().await?)),
             SyncRequest::SyncOnce => Ok(SyncResponse::Report(self.sync_once().await?)),
             SyncRequest::Conflicts => Ok(SyncResponse::Conflicts(self.conflicts().await?)),
+            SyncRequest::ObjectAccess => Ok(SyncResponse::ObjectAccess(
+                self.client.object_status().await?,
+            )),
+            SyncRequest::RetainedDraft { model, id } => Ok(SyncResponse::RetainedDraft(
+                self.client.retained_draft(&model, id).await?,
+            )),
+            SyncRequest::ResumeObject { model, id } => {
+                self.client.resume_object(&model, id).await?;
+                Ok(SyncResponse::Resolved)
+            }
+            SyncRequest::DiscardRetainedDraft { model, id } => {
+                self.client.discard_retained_draft(&model, id).await?;
+                Ok(SyncResponse::Resolved)
+            }
             SyncRequest::Resolve {
                 model,
                 id,
@@ -206,3 +249,16 @@ pub async fn che_model_sync(
 }
 
 pub(crate) const TYPESCRIPT_CLIENT: &str = include_str!("sync_client.ts");
+
+/// Schema-only module for protocol-3 client infrastructure. Include alongside
+/// application modules when discovering desired compiled migration state.
+pub struct ObjectSyncSchema;
+impl crate::AppModule for ObjectSyncSchema {
+    fn name(&self) -> &'static str {
+        "che_object_sync"
+    }
+    fn schema(&self) -> che_orm::SchemaSet {
+        che_sync::object_log::schema(che_sync::SchemaRole::Client)
+    }
+    fn init(&self, _: &mut crate::ModuleContext) {}
+}

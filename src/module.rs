@@ -250,10 +250,11 @@ impl ModuleContext {
             }
         }
         for table in &self.local_tables {
-            if schema
-                .sync_models()
-                .iter()
-                .any(|model| model.schema.name == *table)
+            if table.starts_with("_sync_")
+                || schema
+                    .sync_models()
+                    .iter()
+                    .any(|model| model.schema.name == *table)
             {
                 return Err(ApiError::bad_request(format!(
                     "sync table {table} cannot be used by ordinary local or cached resources"

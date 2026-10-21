@@ -243,3 +243,9 @@ Before making broad API changes, inspect current usage in `../ewa-mobile/src-tau
 - The UI uses `window.__TAURI__.core.invoke` with `withGlobalTauri` enabled, local assets and one handler list. Keep the CSP, capability and command names aligned.
 - Keep `Cargo.lock` for this application workspace. Ignore generated `client/src-tauri/gen/` schemas, build output and SQLite files; do not commit runtime data.
 - When reporting verification, distinguish desktop compilation from actually launching and inspecting the GUI.
+
+## Object Synchronization
+
+- `TauriSync::open_objects` explicitly selects protocol 3; use `ObjectSyncSchema` alongside application modules for pure migration discovery. Apply frozen follow-up migrations before open. Never upgrade v2 or discard submitted requests automatically.
+- `che_model_sync` exposes `object_access`, `retained_draft`, `resume_object`, and `discard_retained_draft`. Revoked rows disappear from ordinary ORM reads while local drafts and unknown submitted outcomes remain durable. A regranted draft requires explicit review before new submissions.
+- Todo retains its v2 mode and frozen baseline. `migrate-objects` / `serve-objects`, `TODO_OBJECT_ACCOUNT`, and explicit `upgrade-objects` select the separate shared-object workflow. See the example README and `../che-rest/docs/object-sync.md`.
