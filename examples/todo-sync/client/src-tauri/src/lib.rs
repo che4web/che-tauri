@@ -161,7 +161,11 @@ pub async fn update(
     if let Some(done) = done {
         todo.done = done;
     }
-    sync.save(&todo).await
+    sync.database()
+        .save(&todo)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Задача не найдена"))?;
+    Ok(())
 }
 
 pub async fn remove(sync: &TauriSync, id: Uuid) -> ApiResult<()> {

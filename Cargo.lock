@@ -403,7 +403,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "che-orm"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "che-orm-macros",
  "deadpool-sqlite",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "che-orm-macros"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "che-tauri"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "che-orm",

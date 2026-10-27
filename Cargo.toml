@@ -1,6 +1,6 @@
 [package]
 name = "che-tauri"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [features]
@@ -9,7 +9,7 @@ sync = ["dep:che-sync"]
 
 [dependencies]
 async-trait = "0.1"
-che-orm = { version = "0.3", path = "../che-orm" }
+che-orm = { version = "0.3.2", path = "../che-orm" }
 che-sync = { version = "0.1", path = "../che-orm/che-sync", optional = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

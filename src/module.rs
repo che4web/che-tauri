@@ -31,6 +31,10 @@ impl InstalledApps {
         Self::default()
     }
 
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "Builder-style module registration, not arithmetic addition"
+    )]
     pub fn add<M>(mut self, module: M) -> Self
     where
         M: AppModule + 'static,

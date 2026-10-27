@@ -333,12 +333,12 @@ where
     };
 
     for field in serializer.fields() {
-        if let Some(relation) = field.relation {
-            if let Some(nested) = object.get(field.name).and_then(Value::as_object) {
-                relation
-                    .cache_json(db, Value::Object(nested.clone()))
-                    .await?;
-            }
+        if let Some(relation) = field.relation
+            && let Some(nested) = object.get(field.name).and_then(Value::as_object)
+        {
+            relation
+                .cache_json(db, Value::Object(nested.clone()))
+                .await?;
         }
     }
 
@@ -421,7 +421,7 @@ fn cache_values<M: Model>(
             }
             Some(Value::Object(object)) if model_field.column_type == ColumnType::Text => {
                 DatabaseValue::Text(
-                    coerce_text_value(&object)
+                    coerce_text_value(object)
                         .unwrap_or_else(|| Value::Object(object.clone()).to_string()),
                 )
             }
@@ -779,13 +779,13 @@ pub fn validate_object<M: Model>(value: Value, fields: &[Field]) -> Result<Map<S
                 }
 
                 validate_type(field.name, model_field.column_type, value)?;
-                if let Some(choices) = &model_field.choices {
-                    if !value.as_str().is_some_and(|value| choices.contains(&value)) {
-                        return Err(SerializerError::InvalidType {
-                            field: field.name.to_string(),
-                            expected: "allowed enum choice",
-                        });
-                    }
+                if let Some(choices) = &model_field.choices
+                    && !value.as_str().is_some_and(|value| choices.contains(&value))
+                {
+                    return Err(SerializerError::InvalidType {
+                        field: field.name.to_string(),
+                        expected: "allowed enum choice",
+                    });
                 }
                 if let Some(max_length) = field.max_length {
                     validate_max_length(field.name, max_length, value)?;

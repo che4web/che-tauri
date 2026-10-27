@@ -465,18 +465,15 @@ where
         let mut local_params = params.clone();
         local_params.remove("force_remote");
 
-        if !force_remote {
-            if let Ok(local_value) =
+        if !force_remote
+            && let Ok(local_value) =
                 local_list::<M>(state, &self.serializer, &self.filterset, &local_params).await
-            {
-                if local_value
-                    .get("results")
-                    .and_then(Value::as_array)
-                    .is_some_and(|results| !results.is_empty())
-                {
-                    return Ok(local_value);
-                }
-            }
+            && local_value
+                .get("results")
+                .and_then(Value::as_array)
+                .is_some_and(|results| !results.is_empty())
+        {
+            return Ok(local_value);
         }
 
         let remote_params = self.filterset.remote_params(&local_params);
@@ -729,11 +726,7 @@ where
         .db()
         .count_query(filterset.apply(M::query(), &count_params)?)
         .await?;
-    let mut query = filterset.apply(M::query(), params)?;
-    // SQLite requires LIMIT when OFFSET is used on its own.
-    if params.contains_key("offset") && !params.contains_key("limit") {
-        query = query.limit(i64::MAX as u64);
-    }
+    let query = filterset.apply(M::query(), params)?;
     let models = state.db().fetch_all(query).await?;
     let mut results = Vec::with_capacity(models.len());
     for model in &models {
@@ -784,23 +777,23 @@ where
 }
 
 fn normalize_remote_list<M: che_orm::Model>(value: Value, serializer: ModelSerializer<M>) -> Value {
-    if let Some(object) = value.as_object() {
-        if let Some(results) = object.get("results").and_then(Value::as_array) {
-            let normalized = results
-                .iter()
-                .cloned()
-                .map(|item| serializer.normalize_remote_value(item))
-                .collect::<Vec<_>>();
-            let count = object
-                .get("count")
-                .cloned()
-                .unwrap_or_else(|| Value::from(normalized.len()));
+    if let Some(object) = value.as_object()
+        && let Some(results) = object.get("results").and_then(Value::as_array)
+    {
+        let normalized = results
+            .iter()
+            .cloned()
+            .map(|item| serializer.normalize_remote_value(item))
+            .collect::<Vec<_>>();
+        let count = object
+            .get("count")
+            .cloned()
+            .unwrap_or_else(|| Value::from(normalized.len()));
 
-            return json!({
-                "count": count,
-                "results": normalized,
-            });
-        }
+        return json!({
+            "count": count,
+            "results": normalized,
+        });
     }
 
     if let Some(results) = value.as_array() {

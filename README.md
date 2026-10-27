@@ -29,7 +29,7 @@ Use it from an app crate with path dependencies:
 
 ```toml
 [dependencies]
-che-orm = { version = "0.3", path = "../../che-orm" }
+che-orm = { version = "0.3.2", path = "../../che-orm" }
 che-tauri = { path = "../../che-tauri" }
 tauri = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -124,7 +124,7 @@ impl AppModule for UsersModule {
 
 ## Models
 
-Models use the `che-orm` 0.3 API and derive `serde::Serialize` for response serialization:
+Models use the `che-orm` 0.3.2 API and derive `serde::Serialize` for response serialization:
 
 ```rust
 use che_orm::Model;
@@ -615,6 +615,14 @@ Use `TauriSync::from_engine(client.engine(transport).with_page_size(50)?)` to
 customize page size. Save offline edits through the managed client's `save` or
 its configured `database()` handle, so capture remains active. Saving through
 another unconfigured database handle bypasses sync capture.
+
+For an existing materialized model, `sync.database().save(&model).await?`
+updates by primary key and returns `Option<Model>` with the stored values;
+`None` means the row no longer exists. It preserves `auto_now_add`, refreshes
+`auto_now`, and captures the edit for synchronization. This ORM method never
+inserts and writes all ordinary fields, so load a fresh model before editing,
+or use `update().set(...)` for selected fields. Use `sync.save(&model)` when
+creating a new UUID sync record.
 
 With the `sync` feature, `generate-ts` also writes `sync.ts`:
 
