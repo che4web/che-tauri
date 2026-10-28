@@ -69,6 +69,30 @@ const restored = hint ? await vault.unlock(hint, password) : null;
 await vault.lock();
 ```
 
+Automatic reopening is opt-in. A consuming app can install and initialize
+`tauri-plugin-keyring` with its app-specific service name and allow only its
+set/get/delete-password commands. Then use the generated adapter:
+
+```typescript
+import { CredentialVault, SystemCredentialStore } from './generated/credentials';
+const vault = new CredentialVault<Account>('my-app');
+const store = new SystemCredentialStore();
+await vault.rememberAutomatically(account, store);
+const hint = vault.lastAccount();
+const restored = hint?.unlock === 'system'
+  ? await vault.unlockAutomatically(hint, store)
+  : null;
+await vault.forget(store); // explicit logout; does not delete offline databases
+```
+
+This generates a random vault secret and keeps it in the system credential
+store, never in WebView storage or beside the encrypted vault. Native keyring
+setup is required on each supported platform. Existing password vaults can be
+unlocked once with `unlock(hint, password)` and rewritten with
+`rememberAutomatically(account, store)`; existing `remember`/`unlock` behavior
+remains unchanged. Failure to persist the system key does not replace the old
+account hint.
+
 Each account has an encrypted vault; WebView storage holds only the hint. This
 helper does not encrypt domain SQLite databases. Application namespaces and
 server/account identities must remain stable across releases.
