@@ -23,6 +23,8 @@ The root is one library crate. `examples/todo-sync` is an independent Cargo work
 - `Cargo.toml`: library dependencies.
 - `src/lib.rs`: public exports.
 - `src/api.rs`: `TauriApi`, `che_api`, local and remote invoke resources, auth login.
+- `src/commands.rs`: typed application-operation registry, framework `che_invoke` command and schema-based TypeScript generator. Runtime and management must use the same registry.
+- `src/credentials.rs` / `src/credentials.ts`: optional Stronghold plugin setup and generated password-unlocked vault helper (`credentials` feature).
 - `src/module.rs`: `AppModule`, `InstalledApps`, `ModuleContext`, resource registration metadata.
 - `src/serializer.rs`: `Field`, `ModelSerializer`, related serializers, JSON validation and remote normalization.
 - `src/filters.rs`: `Filter`, `FilterSet`, lookup parsing, local filters, remote filter forwarding.
@@ -135,6 +137,8 @@ Notes:
 - `models.ts`: response/create/update/list param interfaces.
 - `api.ts`: resource-specific `createModelApi` exports.
 - `sync.ts`: `modelSync` plus typed status/conflict/resolution messages, when the management binary enables `sync`.
+- `commands.ts`: typed application operations when `Management::with_commands(router)` is supplied. Derive `che_tauri::schemars::JsonSchema` for DTOs (set `#[schemars(crate = "che_tauri::schemars")]` in consuming crates). Schemas follow Serde's separate input/output contracts; conflicting names fail generation.
+- `credentials.ts`: generic `CredentialVault<Account>` when `Management::with_credentials()` is enabled. Generation works without enabling the native plugin; native installation requires the `credentials` Cargo feature.
 
 Do not hand-edit generated frontend files in consuming apps unless the task explicitly asks for it. Change Rust model/serializer/filter/resource metadata and regenerate instead.
 For sync client changes, edit `src/sync_client.ts` and regenerate. The Todo UI is hand-written plain JavaScript using invoke directly; it has no generated TypeScript or npm build step.

@@ -55,11 +55,30 @@ enum Command {
 
 pub struct Management {
     apps: InstalledApps,
+    commands: Vec<crate::commands::CommandMetadata>,
+    credentials: bool,
 }
 
 impl Management {
     pub fn new(apps: InstalledApps) -> Self {
-        Self { apps }
+        Self {
+            apps,
+            commands: Vec::new(),
+            credentials: false,
+        }
+    }
+
+    pub fn with_commands<S: Send + Sync + 'static>(
+        mut self,
+        commands: crate::CommandRouter<S>,
+    ) -> Self {
+        self.commands = commands.metadata().to_vec();
+        self
+    }
+
+    pub fn with_credentials(mut self) -> Self {
+        self.credentials = true;
+        self
     }
 
     pub async fn run(self) -> ManageResult<()> {
@@ -225,10 +244,21 @@ impl Management {
 
     fn generate_ts(&self, out: PathBuf) -> ManageResult<()> {
         let endpoints = self.api_endpoints();
+        let commands = if self.commands.is_empty() {
+            None
+        } else {
+            Some(crate::commands::typescript(&self.commands)?)
+        };
         fs::create_dir_all(&out)?;
         fs::write(out.join("api_client.ts"), api_client_ts())?;
         fs::write(out.join("models.ts"), models_ts(&endpoints))?;
         fs::write(out.join("api.ts"), api_ts(&endpoints))?;
+        if let Some(commands) = commands {
+            fs::write(out.join("commands.ts"), commands)?;
+        }
+        if self.credentials {
+            fs::write(out.join("credentials.ts"), include_str!("credentials.ts"))?;
+        }
         #[cfg(feature = "sync")]
         fs::write(out.join("sync.ts"), crate::sync::TYPESCRIPT_CLIENT)?;
 

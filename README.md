@@ -1,5 +1,78 @@
 # che-tauri
 
+## Typed application commands
+
+For application operations beyond the ordinary i64 resource CRUD API, register
+typed handlers once. `CommandRouter` provides dispatch through `che_invoke` and
+generates TypeScript from Rust's Serde contracts via `schemars::JsonSchema`:
+
+```rust,ignore
+use std::sync::Arc;
+use che_tauri::{ApiResult, CommandRouter, schemars::JsonSchema};
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "che_tauri::schemars")]
+struct GreetInput { name: String }
+
+fn commands() -> ApiResult<CommandRouter<MyState>> {
+    CommandRouter::new().command("greet", |_state: Arc<MyState>, input: GreetInput| async move {
+        Ok(format!("Hello, {}", input.name))
+    })
+}
+
+// In Tauri setup:
+app.manage(commands()?.bind(Arc::new(MyState::new())));
+// On the builder:
+// .invoke_handler(tauri::generate_handler![che_tauri::che_invoke])
+
+// In manage (no runtime state/database/network required):
+che_tauri::Management::new(apps::installed_apps())
+    .with_commands(commands()?)
+    .run().await?;
+```
+
+`manage generate-ts` additionally writes `commands.ts`; JS uses
+`commands.greet({ name: 'World' })`. UUIDs are strings. Unit input accepts no JS
+argument and sends JSON null. Errors use the existing `ApiError` shape; generated
+`errorMessage` formats rejected invokes. Duplicate operation names are rejected.
+DTO names must be unambiguous across input/output serialization contracts; give
+distinct DTOs distinct schema names when Serde changes their wire shapes.
+Unsupported schemas fail generation rather than silently degrading to `any`.
+Recursive references are normalized so a DTO can be used both as an operation's
+root response and inside another DTO. Names colliding with generated helpers
+(such as `InvokeError` or `Promise`) receive stable `ApiDto…` aliases, with suffixes
+when needed; references and operation signatures use the same aliases.
+
+With `sync`, DTO conflict fields may use
+`#[schemars(with = "Vec<che_tauri::sync::schema::Conflict>")]` to describe
+`Vec<che_sync::protocol::Conflict>` without application-owned protocol types.
+
+### Credential vault
+
+Enable `credentials` and call `che_tauri::credentials::install(app.handle())` from
+setup to install Stronghold with its Argon2 salt under the app-local directory.
+Use `Management::with_credentials()` to generate `credentials.ts` (generation does
+not require enabling the native feature). The consuming JS project needs
+`@tauri-apps/plugin-stronghold` and its Tauri capability permission.
+The consuming Rust app must also list optional `tauri-plugin-stronghold = "2"`
+and enable it alongside `che-tauri/credentials`: Tauri's build system discovers
+plugin ACL metadata only from direct dependencies. Plugin initialization still
+belongs to `che-tauri`.
+
+```typescript
+import { CredentialVault } from './generated/credentials';
+const vault = new CredentialVault<Account>('my-app');
+await vault.remember(account, password);
+const hint = vault.lastAccount();
+const restored = hint ? await vault.unlock(hint, password) : null;
+await vault.lock();
+```
+
+Each account has an encrypted vault; WebView storage holds only the hint. This
+helper does not encrypt domain SQLite databases. Application namespaces and
+server/account identities must remain stable across releases.
+
 Tauri invoke API layer for `che-orm` applications.
 
 `che-tauri` mirrors the app/module/serializer/filter architecture from `che-rest`.

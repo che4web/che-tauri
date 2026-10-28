@@ -13,6 +13,8 @@ use che_sync::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod schema;
+
 use crate::{ApiResult, error::ApiError};
 
 /// Frontend commands are independent of the i64 resource CRUD request format.
@@ -77,7 +79,7 @@ pub enum SyncResponse {
 
 /// One bounded engine step. Inspect `blocked`/`conflicts` before scheduling
 /// another step, and keep pulling while `has_more` is true.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SyncStatus {
     pub accepted_operations: usize,
     pub rejected_operations: usize,

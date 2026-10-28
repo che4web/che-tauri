@@ -1,5 +1,8 @@
 pub mod api;
+pub mod commands;
 pub mod config;
+#[cfg(feature = "credentials")]
+pub mod credentials;
 pub mod error;
 pub mod filters;
 pub mod management;
@@ -13,11 +16,13 @@ pub use api::{
     ApiAction, ApiRequest, AuthTokenResponse, CachedMappedRemoteInvokeSet, MappedRemoteInvokeSet,
     ModelInvokeSet, RawRemoteInvokeSet, TauriApi, che_api,
 };
+pub use commands::{CommandRequest, CommandRouter, TauriCommands, che_invoke};
 pub use config::{AppConfig, DatabaseConfig, RemoteConfig};
 pub use error::{ApiError, ApiResult};
 pub use filters::{Filter, FilterError, FilterSet, Lookup};
 pub use management::Management;
 pub use module::{ApiEndpoint, ApiField, ApiFilter, AppModule, InstalledApps, ModuleContext};
+pub use schemars;
 pub use serializer::{Field, ModelSerializer, RelatedModel, RelatedSerializer, SerializerError};
 pub use state::AppState;
 
