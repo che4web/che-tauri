@@ -1,7 +1,16 @@
 [package]
 name = "che-tauri"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
+description = "Typed Tauri application commands, ORM resources and offline synchronization"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/che4web/che-tauri"
+homepage = "https://github.com/che4web/che-tauri"
+documentation = "https://docs.rs/che-tauri"
+keywords = ["tauri", "orm", "offline", "sync", "typescript"]
+categories = ["database", "gui"]
+exclude = ["che-back/**", "examples/**"]
 
 [features]
 default = []
@@ -10,8 +19,8 @@ credentials = ["dep:tauri-plugin-stronghold"]
 
 [dependencies]
 async-trait = "0.1"
-che-orm = { version = "0.3.2", path = "../che-orm" }
-che-sync = { version = "0.1", path = "../che-orm/che-sync", optional = true }
+che-orm = { version = "0.3.3", path = "../che-orm" }
+che-sync = { version = "0.1.2", path = "../che-orm/che-sync", optional = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

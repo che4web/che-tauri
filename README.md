@@ -1,5 +1,8 @@
 # che-tauri
 
+Current release candidate: **0.1.2**, licensed under [MIT](LICENSE).
+See [the release notes](CHANGELOG.md) and [publication checklist](docs/releasing.md).
+
 ## Typed application commands
 
 For application operations beyond the ordinary i64 resource CRUD API, register
@@ -126,7 +129,7 @@ Use it from an app crate with path dependencies:
 
 ```toml
 [dependencies]
-che-orm = { version = "0.3.2", path = "../../che-orm" }
+che-orm = { version = "0.3.3", path = "../../che-orm" }
 che-tauri = { path = "../../che-tauri" }
 tauri = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -221,7 +224,7 @@ impl AppModule for UsersModule {
 
 ## Models
 
-Models use the `che-orm` 0.3.2 API and derive `serde::Serialize` for response serialization:
+Models use the `che-orm` 0.3.3 API and derive `serde::Serialize` for response serialization:
 
 ```rust
 use che_orm::Model;
