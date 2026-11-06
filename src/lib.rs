@@ -1,8 +1,6 @@
 pub mod api;
 pub mod commands;
 pub mod config;
-#[cfg(feature = "credentials")]
-pub mod credentials;
 pub mod error;
 pub mod filters;
 pub mod management;

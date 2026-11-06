@@ -7,11 +7,16 @@ feature `sync` also requires **che-sync 0.2.0**, which depends on
 
 ## Current release status
 
-The previous 0.1.2 candidate passed functional checks and packaging but was not security-cleared:
-the optional credentials dependency chain still has five RustSec advisories after
-compatible upgrades. See [the full verification report](release-verification-2026-11-06.md).
-Do not interpret package/dry-run success as audit approval. No advisories have
-been ignored and no publication has been performed.
+The previous 0.1.2 candidate passed functional checks and packaging. Its
+optional native credentials dependency chain had five RustSec advisories.
+
+The 0.2.0 candidate removes native Stronghold and the `credentials` Cargo
+feature and installer. The audit recorded after that removal reported zero
+vulnerabilities and inherited GTK warnings. The generated vault helper remains
+available through `Management::with_credentials()`. Applications using it own
+native plugin installation and review their own Stronghold advisories.
+See [the full verification report](release-verification-2026-11-06.md).
+No audit exclusions or publication were performed.
 
 Rust 1.90 is the declared and tested minimum for current Tauri dependencies;
 Rust 1.88 is unsupported here even though the ORM/sync crates support it.
@@ -47,8 +52,7 @@ Macros 0.3.2 and che-sync-protocol 0.1.0 remain unchanged and published.
 che-rest 0.4.0 is required by the updated Todo example and optional HTTP batch integration,
 but is not a direct library dependency. The che-tauri crates.io API returned
 404 on 2026-11-06: this is its first publication. A later check during preparation confirmed che-sync 0.1.3
-is now indexed, and the ordinary registry dry run passed. Once the unresolved
-security findings are resolved/reviewed:
+is now indexed, and the ordinary registry dry run passed. After reviewing the native adapter removal and committing the intended source:
 
 ```sh
 cargo publish --dry-run --locked

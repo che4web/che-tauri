@@ -3,8 +3,9 @@
 Current release candidate: **0.2.0**, licensed under [MIT](LICENSE).
 See [the release notes](CHANGELOG.md) and [publication checklist](docs/releasing.md).
 Requires Rust **1.90+** with the current Tauri 2 dependencies.
-The optional credentials dependency chain has unresolved audit findings; see
-[the release verification report](docs/release-verification-2026-11-06.md).
+Native Stronghold installation is application-owned; it is not a Rust dependency
+of this library. Applications using the optional generated vault helper must
+review their own plugin dependencies; see [the verification report](docs/release-verification-2026-11-06.md).
 
 ## Typed application commands
 
@@ -56,15 +57,28 @@ With `sync`, DTO conflict fields may use
 
 ### Credential vault
 
-Enable `credentials` and call `che_tauri::credentials::install(app.handle())` from
-setup to install Stronghold with its Argon2 salt under the app-local directory.
-Use `Management::with_credentials()` to generate `credentials.ts` (generation does
-not require enabling the native feature). The consuming JS project needs
-`@tauri-apps/plugin-stronghold` and its Tauri capability permission.
-The consuming Rust app must also list optional `tauri-plugin-stronghold = "2"`
-and enable it alongside `che-tauri/credentials`: Tauri's build system discovers
-plugin ACL metadata only from direct dependencies. Plugin initialization still
-belongs to `che-tauri`.
+Use `Management::with_credentials()` to generate `credentials.ts`. The library
+has no native Stronghold adapter or `credentials` Cargo feature. Applications
+choosing this helper install `@tauri-apps/plugin-stronghold`, the native
+`tauri-plugin-stronghold` dependency and its capability permissions themselves.
+Tauri discovers plugin ACL metadata only from direct application dependencies.
+
+Replace the removed `che_tauri::credentials::install` call in application setup
+with the equivalent native plugin initialization:
+
+```rust,ignore
+use tauri::Manager;
+let root = app.path().app_local_data_dir()?;
+std::fs::create_dir_all(&root)?;
+app.handle().plugin(
+    tauri_plugin_stronghold::Builder::with_argon2(&root.join("vault-salt")).build(),
+)?;
+```
+
+For existing installations keep the same app identifier, salt path and vault
+namespace so encrypted accounts remain readable. This moves plugin installation;
+it does not fix the upstream Stronghold advisories in applications that use it.
+The generated helper and its system-keyring API remain unchanged.
 
 ```typescript
 import { CredentialVault } from './generated/credentials';

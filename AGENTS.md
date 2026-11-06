@@ -24,7 +24,7 @@ The root is one library crate. `examples/todo-sync` is an independent Cargo work
 - `src/lib.rs`: public exports.
 - `src/api.rs`: `TauriApi`, `che_api`, local and remote invoke resources, auth login.
 - `src/commands.rs`: typed application-operation registry, framework `che_invoke` command and schema-based TypeScript generator. Runtime and management must use the same registry.
-- `src/credentials.rs` / `src/credentials.ts`: optional Stronghold plugin setup and generated password-unlocked vault helper (`credentials` feature).
+- `src/credentials.ts`: optional generated vault helper. Native Stronghold installation belongs to consuming applications; the library has no Stronghold Rust dependency or credentials Cargo feature.
 - `src/module.rs`: `AppModule`, `InstalledApps`, `ModuleContext`, resource registration metadata.
 - `src/serializer.rs`: `Field`, `ModelSerializer`, related serializers, JSON validation and remote normalization.
 - `src/filters.rs`: `Filter`, `FilterSet`, lookup parsing, local filters, remote filter forwarding.
@@ -138,7 +138,7 @@ Notes:
 - `api.ts`: resource-specific `createModelApi` exports.
 - `sync.ts`: `modelSync` plus typed status/conflict/resolution messages, when the management binary enables `sync`.
 - `commands.ts`: typed application operations when `Management::with_commands(router)` is supplied. Derive `che_tauri::schemars::JsonSchema` for DTOs (set `#[schemars(crate = "che_tauri::schemars")]` in consuming crates). Schemas follow Serde's separate input/output contracts; conflicting names fail generation.
-- `credentials.ts`: generic `CredentialVault<Account>` when `Management::with_credentials()` is enabled. Generation works without enabling the native plugin; native installation requires the `credentials` Cargo feature.
+- `credentials.ts`: generic `CredentialVault<Account>` when `Management::with_credentials()` is enabled. Generation does not require a native plugin. Applications choosing Stronghold install it directly and preserve existing salt paths/vault namespaces.
 
 Do not hand-edit generated frontend files in consuming apps unless the task explicitly asks for it. Change Rust model/serializer/filter/resource metadata and regenerate instead.
 For sync client changes, edit `src/sync_client.ts` and regenerate. The Todo UI is hand-written plain JavaScript using invoke directly; it has no generated TypeScript or npm build step.
@@ -258,6 +258,6 @@ Before making broad API changes, inspect current usage in `../ewa-mobile/src-tau
 
 - The unpublished candidate is che-tauri 0.2.0, requiring che-orm 0.4.0 and optional che-sync 0.2.0. Preserve the existing v0.1.2 tag (earlier candidate); do not move it. See docs/releasing.md for publication order and final verification.
 - Keep che-back and examples out of the library archive. Never stage the nested che-back repository as part of library release preparation.
-- Verify all features, including credentials, plus the independent Todo workspace. Batch behavior stays in che-sync/che-rest; do not duplicate HTTP or cursor storage in che-tauri.
-- Release audit currently has unresolved crypto-bigint/ZIP advisories in optional Stronghold dependencies; see docs/release-verification-2026-11-06.md. Do not add audit exclusions or describe the candidate as security-cleared without an explicit reviewed resolution.
+- Verify all library features plus the independent Todo workspace; check app-owned credential plugins in their consumers. Batch behavior stays in che-sync/che-rest; do not duplicate HTTP or cursor storage in che-tauri.
+- Native Stronghold dependencies were removed from the library to keep integration application-owned. Keep the generated CredentialVault/SystemCredentialStore APIs intact; applications retaining Stronghold still have their own upstream crypto/ZIP audit findings. Do not hide them with audit exclusions.
 - Dependency refresh moved the library parser to toml 1.2; file-loading compatibility tests live in src/config.rs. Todo intentionally keeps reqwest 0.12 for che-rest. Its GTK/proc-macro chain pins old toml_datetime; do not force an incompatible transitive TOML update to make a version list look newer.

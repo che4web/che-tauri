@@ -16,7 +16,6 @@ exclude = ["che-back/**", "examples/**"]
 [features]
 default = []
 sync = ["dep:che-sync"]
-credentials = ["dep:tauri-plugin-stronghold"]
 
 [dependencies]
 async-trait = "0.1.92"
@@ -28,7 +27,6 @@ serde_json = "1.0.154"
 schemars = { version = "1.2.3", features = ["uuid1"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"] }
 tauri = "2.12.5"
-tauri-plugin-stronghold = { version = "2.4.0", optional = true }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["sync"] }
 toml = "1.2.0"

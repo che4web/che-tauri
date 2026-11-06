@@ -11,8 +11,9 @@
 
 - Add a typed application command registry and generate TypeScript contracts from
   Serde schemas through `schemars`.
-- Add optional Stronghold credential storage and generate vault helpers with
-  system-keyring automatic unlock while keeping secrets out of WebView storage.
+- Generate optional vault helpers with system-keyring automatic unlock while
+  keeping secrets out of WebView storage. Native Stronghold installation is
+  application-owned; remove the library credentials feature and installer.
 - Require che-orm 0.3.3 and che-sync 0.1.3 for the current native consumers,
   including optional batched model journal pulls through supplied transports.
 - Upgrade configuration parsing from toml 0.8 to toml 1.2 and align direct
@@ -20,7 +21,8 @@
   reqwest 0.12 for the che-rest HTTP transport.
 - Declare Rust 1.90 as the minimum supported compiler for current Tauri 2.
 - Refresh compatible dependencies to fix Tokio, TLS and QUIC advisories;
-  document remaining upstream Stronghold/ZIP findings without audit exclusions.
+  document upstream Stronghold/ZIP findings in consuming applications without
+  audit exclusions. The library no longer pulls in that dependency chain.
 - Add MIT licensing and crates.io package metadata; exclude the independent
   Todo example and nested development repository from the library archive.
 
