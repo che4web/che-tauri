@@ -2,6 +2,9 @@
 
 Current release candidate: **0.1.2**, licensed under [MIT](LICENSE).
 See [the release notes](CHANGELOG.md) and [publication checklist](docs/releasing.md).
+Requires Rust **1.90+** with the current Tauri 2 dependencies.
+The optional credentials dependency chain has unresolved audit findings; see
+[the release verification report](docs/release-verification-2026-11-06.md).
 
 ## Typed application commands
 
@@ -686,6 +689,13 @@ protocol use `che_rest::sync_http::{RestModelTransport, RestResource}` with
 `che-rest`'s `sync-http` feature. HTTP routing, serializer mapping and retry payload
 encoding stay in that adapter; `che-tauri` does not duplicate the wire protocol.
 Use the server's ORM serializer type for each `RestResource` mapping.
+
+With che-rest 0.3.4 and a server exposing the aggregate journal action, enable
+`RestModelTransport::with_batched_changes()` before passing the transport to
+`TauriSync`. The engine retains independent durable model positions and applies
+pages in registry order; history reset blocks new submissions without deleting
+pending work. Default transports keep per-model reads. This does not change
+write identity, credentials ownership or select object-sync protocol 3.
 `che-rest` currently uses reqwest 0.12, so give its transport a matching client
 (for example an application dependency named `reqwest_sync` with package
 `reqwest`, version `0.12`, features `json,rustls-tls`, default features disabled).

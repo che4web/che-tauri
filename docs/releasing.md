@@ -1,18 +1,32 @@
 # Publishing che-tauri
 
 The first crates.io candidate is **0.1.2**. It requires **che-orm 0.3.3**;
-feature `sync` also requires **che-sync 0.1.2**, which depends on
+feature `sync` also requires **che-sync 0.1.3**, which depends on
 **che-sync-protocol 0.1.0**. The license is MIT. The independent
 `examples/todo-sync` workspace and nested `che-back` repository are excluded.
+
+## Current release status
+
+The candidate passes functional checks and packaging but is not security-cleared:
+the optional credentials dependency chain still has five RustSec advisories after
+compatible upgrades. See [the full verification report](release-verification-2026-11-06.md).
+Do not interpret package/dry-run success as audit approval. No advisories have
+been ignored and no publication has been performed.
+
+Rust 1.90 is the declared and tested minimum for current Tauri dependencies;
+Rust 1.88 is unsupported here even though the ORM/sync crates support it.
 
 ## Verify
 
 ```sh
 cargo fmt --check
+cargo +1.90.0 check --all-targets --all-features --locked
 cargo check --all-targets --all-features
 cargo test
-cargo test --features sync
-cargo clippy --all-targets --features sync -- -D warnings
+cargo test --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo audit
+cargo audit --file examples/todo-sync/Cargo.lock
 cargo package --list
 cargo publish --dry-run
 ```
@@ -28,16 +42,21 @@ Changes to the shared Todo example also require its checks from `AGENTS.md`.
 ## Publish
 
 Publish and wait for dependency index entries in this order, skipping existing
-versions: che-orm 0.3.3, che-sync 0.1.2, then che-tauri 0.1.2.
-che-sync-protocol 0.1.0 is already published. After the dependencies are indexed:
+versions: che-sync 0.1.3, then che-tauri 0.1.2. che-orm 0.3.3 and
+che-sync-protocol 0.1.0 are already published; do not republish them. che-rest
+0.3.4 is required by the updated Todo example and optional HTTP batch integration,
+but is not a direct library dependency. The che-tauri crates.io API returned
+404 on 2026-11-06: this is its first publication. After the dependencies are indexed:
 
 ```sh
 cargo publish --dry-run --locked
 cargo publish --locked
 ```
 
-The Git release tag is `v0.1.2`. A tag identifies the candidate and does not imply
-that a crates.io publication or docs.rs build has completed.
+The existing `v0.1.2` tag identifies an earlier candidate; do not move it.
+After publishing the reviewed current commit and checking docs.rs, create the
+new package-specific tag `che-tauri-v0.1.2`. No tag or archive alone proves a
+crates.io publication or docs.rs build.
 
 ## Candidate verification (2026-11-02)
 

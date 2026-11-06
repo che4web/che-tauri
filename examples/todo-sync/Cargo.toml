@@ -4,7 +4,7 @@ members = ["model", "server", "client/src-tauri"]
 
 [workspace.dependencies]
 che-orm = { version = "0.3.3", path = "../../../che-orm" }
-che-rest = { version = "0.3.3", path = "../../../che-rest", features = ["sync-http"] }
+che-rest = { version = "0.3.4", path = "../../../che-rest", features = ["sync-http"] }
 che-sync = { path = "../../../che-orm/che-sync" }
 che-tauri = { path = "../..", features = ["sync"] }
 serde = { version = "1", features = ["derive"] }
