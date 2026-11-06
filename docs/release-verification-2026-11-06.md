@@ -85,3 +85,31 @@ cargo publish --locked
 
 Verify the crate page and docs.rs before creating the new package-specific tag.
 Preparation does not publish, accept audit findings or modify the old tag.
+
+
+## Dependency refresh follow-up
+
+Direct dependency requirements now use the tested current stable baselines:
+Tauri 2.12.5, Stronghold plugin 2.4.0, reqwest 0.13.5, Tokio 1.54.1,
+schemars 1.2.3 and current serde/clap/async-trait/thiserror patches. These are
+ordinary caret requirements, allowing future compatible updates.
+Configuration parsing was upgraded from toml 0.8 to toml 1.2.0; file-loading
+tests cover database-only and remote settings, literal paths, missing fields
+and invalid types. The Todo transport retains reqwest 0.12.28 for compatibility
+with che-rest; its other direct requirements are aligned with current versions.
+
+After this refresh, all-feature tests, Rust 1.90 all-target/all-feature checks,
+Clippy with warnings denied, Todo desktop compilation and server/client tests
+passed. A new all-feature registry publish dry run also passed; no upload was
+performed. These logs have the `update-` prefix in the verification directory.
+The six-archive report above describes the earlier preparation snapshot; it
+must not be treated as the hash report for these subsequent source edits.
+
+Root audit still reports the same five optional Stronghold-chain advisories;
+Todo reports zero vulnerabilities. No alpha plugin upgrade, incompatible crypto
+or ZIP override, feature removal or advisory ignore was introduced.
+
+The Todo graph still contains transitive toml 0.8.2: GTK's proc-macro-crate 2.0.2
+requires toml_datetime exactly 0.6.3. Forcing toml 0.8.23 was tried and rejected
+by Cargo because it needs toml_datetime >=0.6.11. Retain the compatible resolver
+result until upstream constraints change; che-tauri's own parser is now 1.2.

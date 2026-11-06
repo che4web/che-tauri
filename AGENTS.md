@@ -260,3 +260,4 @@ Before making broad API changes, inspect current usage in `../ewa-mobile/src-tau
 - Keep che-back and examples out of the library archive. Never stage the nested che-back repository as part of library release preparation.
 - Verify all features, including credentials, plus the independent Todo workspace. Batch behavior stays in che-sync/che-rest; do not duplicate HTTP or cursor storage in che-tauri.
 - Release audit currently has unresolved crypto-bigint/ZIP advisories in optional Stronghold dependencies; see docs/release-verification-2026-11-06.md. Do not add audit exclusions or describe the candidate as security-cleared without an explicit reviewed resolution.
+- Dependency refresh moved the library parser to toml 1.2; file-loading compatibility tests live in src/config.rs. Todo intentionally keeps reqwest 0.12 for che-rest. Its GTK/proc-macro chain pins old toml_datetime; do not force an incompatible transitive TOML update to make a version list look newer.
