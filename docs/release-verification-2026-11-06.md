@@ -11,8 +11,8 @@ use a new `che-tauri-v0.1.2` tag only after the reviewed publication.
 
 The candidate requires che-orm 0.3.3 and optional che-sync 0.1.3. The Todo
 example uses che-rest 0.3.4. Core ORM and sync-protocol 0.1.0 are already
-published; sync 0.1.3 must be indexed before the che-tauri registry dry run can
-resolve it. REST is an application/example dependency, not a che-tauri library
+published. A repeat crates.io check during preparation confirmed sync 0.1.3
+is now indexed and not yanked; the ordinary che-tauri registry dry run passed. REST is an application/example dependency, not a che-tauri library
 dependency. No new database migration or automatic protocol change is added.
 
 ## Build and integration checks
@@ -74,9 +74,9 @@ Primary advisories:
 
 ## Publication gate
 
-After resolving/reviewing the security findings and publishing/indexing
-che-sync 0.1.3, review and commit the intended source, then run from a clean
-library worktree:
+After resolving/reviewing the security findings, review and commit the intended
+source, then repeat the dry run from a clean library worktree. The dependency
+indexing gate is already satisfied; no publication was performed here:
 
 ```sh
 cargo publish --dry-run --locked

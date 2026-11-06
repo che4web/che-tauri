@@ -46,7 +46,9 @@ versions: che-sync 0.1.3, then che-tauri 0.1.2. che-orm 0.3.3 and
 che-sync-protocol 0.1.0 are already published; do not republish them. che-rest
 0.3.4 is required by the updated Todo example and optional HTTP batch integration,
 but is not a direct library dependency. The che-tauri crates.io API returned
-404 on 2026-11-06: this is its first publication. After the dependencies are indexed:
+404 on 2026-11-06: this is its first publication. A later check during preparation confirmed che-sync 0.1.3
+is now indexed, and the ordinary registry dry run passed. Once the unresolved
+security findings are resolved/reviewed:
 
 ```sh
 cargo publish --dry-run --locked
