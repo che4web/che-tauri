@@ -10,9 +10,9 @@ The root is one library crate. `examples/todo-sync` is an independent Cargo work
 
 ## Stack
 
-- Rust edition 2024.
+- Rust edition 2024; declared/tested minimum Rust 1.90 with the current Tauri 2 dependency chain.
 - Tauri 2 invoke command integration.
-- `che-orm` 0.3 SQLite async `Database`, models, query ASTs and typed query builders.
+- `che-orm` 0.4 SQLite async `Database`, models, query ASTs and bound query builders; the che-tauri candidate is 0.2.0 with che-sync 0.2.0. Preserve the remote v0.1.2 tag and its dependency/configuration changes.
 - `reqwest` for remote REST resources.
 - `serde`/`serde_json` for request and response payloads.
 - `clap` for project-local management commands.
@@ -222,7 +222,7 @@ Before making broad API changes, inspect current usage in `../ewa-mobile/src-tau
 
 ## Optional Synchronization
 
-- Current protocol 2 grants whole-model access. The next requirement is shared objects with per-object permissions; grant/revocation delivery and offline-write handling after access loss are planned in `../che-rest/docs/OBJECT_SYNC_PLAN.md`, not implemented. Do not imply that TauriSync or the Todo example already supports them. One shared UUID/revision must remain consistent across users.
+- Protocol 2 grants whole-model access. Protocol 3 is separate explicit object delivery through `open_objects` and the Object Synchronization workflow below; never switch an existing client automatically or discard its pending work.
 
 - Enable `sync` for `TauriSync`, `che_model_sync` and generated `sync.ts`.
 - Declare sync models in `AppModule::schema()` with `SchemaSet::client_model`. `InstalledApps::sync_registry` reads schemas without running init and preserves module order (FK parents first).
@@ -233,7 +233,7 @@ Before making broad API changes, inspect current usage in `../ewa-mobile/src-tau
 - Register exported commands with fully qualified paths in `tauri::generate_handler!`, e.g. `che_tauri::che_model_sync` / `che_tauri::che_api`. A bare imported function name may leave Tauri's generated command macros out of scope.
 - `AppState` token/config changes affect ordinary remote resources only. The application's sync transport owns its own credentials; renew them for the same server/account without dropping pending data.
 - `TauriApi::build()` rejects ordinary local/cached resource tables that are declared sync models, as well as missing local schema registrations and duplicate resources. Separately configured runtimes and related cascade effects still require application isolation; cache invalidation must never include durable sync data.
-- `pull` downloads one page per model. `flush` sends at most one coalesced record per model, retrying immutable submitted payloads first. Keep UI cycles bounded and stop on `blocked`, conflicts or rejections; no implicit background loop exists.
+- `pull` downloads one page per model; transports can opt in to batched protocol-2 reads through che-sync 0.2.0. che-rest 0.4.0 owns the optional HTTP batch transport. `flush` sends at most one coalesced record per model, retrying immutable submitted payloads first. Keep UI cycles bounded and stop on `blocked`, conflicts or rejections; no implicit background loop exists.
 - Keep revisions and integer protocol values as decimal strings in frontend data. UUIDs are strings. The custom `record` resolution requires an explicit `record` field; null means deletion.
 
 ## Todo Example
@@ -253,3 +253,11 @@ Before making broad API changes, inspect current usage in `../ewa-mobile/src-tau
 - `TauriSync::open_objects` explicitly selects protocol 3; use `ObjectSyncSchema` alongside application modules for pure migration discovery. Apply frozen follow-up migrations before open. Never upgrade v2 or discard submitted requests automatically.
 - `che_model_sync` exposes `object_access`, `retained_draft`, `resume_object`, and `discard_retained_draft`. Revoked rows disappear from ordinary ORM reads while local drafts and unknown submitted outcomes remain durable. A regranted draft requires explicit review before new submissions.
 - Todo retains its v2 mode and frozen baseline. `migrate-objects` / `serve-objects`, `TODO_OBJECT_ACCOUNT`, and explicit `upgrade-objects` select the separate shared-object workflow. See the example README and `../che-rest/docs/object-sync.md`.
+
+## Publication candidate
+
+- The unpublished candidate is che-tauri 0.2.0, requiring che-orm 0.4.0 and optional che-sync 0.2.0. Preserve the existing v0.1.2 tag (earlier candidate); do not move it. See docs/releasing.md for publication order and final verification.
+- Keep che-back and examples out of the library archive. Never stage the nested che-back repository as part of library release preparation.
+- Verify all features, including credentials, plus the independent Todo workspace. Batch behavior stays in che-sync/che-rest; do not duplicate HTTP or cursor storage in che-tauri.
+- Release audit currently has unresolved crypto-bigint/ZIP advisories in optional Stronghold dependencies; see docs/release-verification-2026-11-06.md. Do not add audit exclusions or describe the candidate as security-cleared without an explicit reviewed resolution.
+- Dependency refresh moved the library parser to toml 1.2; file-loading compatibility tests live in src/config.rs. Todo intentionally keeps reqwest 0.12 for che-rest. Its GTK/proc-macro chain pins old toml_datetime; do not force an incompatible transitive TOML update to make a version list look newer.

@@ -1,7 +1,17 @@
 [package]
 name = "che-tauri"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.90"
+description = "Typed Tauri application commands, ORM resources and offline synchronization"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/che4web/che-tauri"
+homepage = "https://github.com/che4web/che-tauri"
+documentation = "https://docs.rs/che-tauri"
+keywords = ["tauri", "orm", "offline", "sync", "typescript"]
+categories = ["database", "gui"]
+exclude = ["che-back/**", "examples/**"]
 
 [features]
 default = []
@@ -9,19 +19,19 @@ sync = ["dep:che-sync"]
 credentials = ["dep:tauri-plugin-stronghold"]
 
 [dependencies]
-async-trait = "0.1"
+async-trait = "0.1.92"
 che-orm = { version = "0.4.0", path = "../che-orm" }
 che-sync = { version = "0.2.0", path = "../che-orm/che-sync", optional = true }
-clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-schemars = { version = "1", features = ["uuid1"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
-tauri = "2"
-tauri-plugin-stronghold = { version = "2", optional = true }
-thiserror = "2"
-tokio = { version = "1", features = ["sync"] }
-toml = "0.8"
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+schemars = { version = "1.2.3", features = ["uuid1"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"] }
+tauri = "2.12.5"
+tauri-plugin-stronghold = { version = "2.4.0", optional = true }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["sync"] }
+toml = "1.2.0"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }

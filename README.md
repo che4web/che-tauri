@@ -1,5 +1,11 @@
 # che-tauri
 
+Current release candidate: **0.2.0**, licensed under [MIT](LICENSE).
+See [the release notes](CHANGELOG.md) and [publication checklist](docs/releasing.md).
+Requires Rust **1.90+** with the current Tauri 2 dependencies.
+The optional credentials dependency chain has unresolved audit findings; see
+[the release verification report](docs/release-verification-2026-11-06.md).
+
 ## Typed application commands
 
 For application operations beyond the ordinary i64 resource CRUD API, register
@@ -69,6 +75,30 @@ const restored = hint ? await vault.unlock(hint, password) : null;
 await vault.lock();
 ```
 
+Automatic reopening is opt-in. A consuming app can install and initialize
+`tauri-plugin-keyring` with its app-specific service name and allow only its
+set/get/delete-password commands. Then use the generated adapter:
+
+```typescript
+import { CredentialVault, SystemCredentialStore } from './generated/credentials';
+const vault = new CredentialVault<Account>('my-app');
+const store = new SystemCredentialStore();
+await vault.rememberAutomatically(account, store);
+const hint = vault.lastAccount();
+const restored = hint?.unlock === 'system'
+  ? await vault.unlockAutomatically(hint, store)
+  : null;
+await vault.forget(store); // explicit logout; does not delete offline databases
+```
+
+This generates a random vault secret and keeps it in the system credential
+store, never in WebView storage or beside the encrypted vault. Native keyring
+setup is required on each supported platform. Existing password vaults can be
+unlocked once with `unlock(hint, password)` and rewritten with
+`rememberAutomatically(account, store)`; existing `remember`/`unlock` behavior
+remains unchanged. Failure to persist the system key does not replace the old
+account hint.
+
 Each account has an encrypted vault; WebView storage holds only the hint. This
 helper does not encrypt domain SQLite databases. Application namespaces and
 server/account identities must remain stable across releases.
@@ -102,7 +132,7 @@ Use it from an app crate with path dependencies:
 
 ```toml
 [dependencies]
-che-orm = { version = "0.3.2", path = "../../che-orm" }
+che-orm = { version = "0.4.0", path = "../../che-orm" }
 che-tauri = { path = "../../che-tauri" }
 tauri = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -197,7 +227,7 @@ impl AppModule for UsersModule {
 
 ## Models
 
-Models use the `che-orm` 0.3.2 API and derive `serde::Serialize` for response serialization:
+Models use the `che-orm` 0.4.0 API and derive `serde::Serialize` for response serialization:
 
 ```rust
 use che_orm::Model;
@@ -659,6 +689,13 @@ protocol use `che_rest::sync_http::{RestModelTransport, RestResource}` with
 `che-rest`'s `sync-http` feature. HTTP routing, serializer mapping and retry payload
 encoding stay in that adapter; `che-tauri` does not duplicate the wire protocol.
 Use the server's ORM serializer type for each `RestResource` mapping.
+
+With che-rest 0.3.4 and a server exposing the aggregate journal action, enable
+`RestModelTransport::with_batched_changes()` before passing the transport to
+`TauriSync`. The engine retains independent durable model positions and applies
+pages in registry order; history reset blocks new submissions without deleting
+pending work. Default transports keep per-model reads. This does not change
+write identity, credentials ownership or select object-sync protocol 3.
 `che-rest` currently uses reqwest 0.12, so give its transport a matching client
 (for example an application dependency named `reqwest_sync` with package
 `reqwest`, version `0.12`, features `json,rustls-tls`, default features disabled).

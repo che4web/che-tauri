@@ -16,10 +16,10 @@ che-tauri.workspace = true
 todo-sync-model.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
-tauri = { version = "2", optional = true }
+tauri = { version = "2.12.5", optional = true }
 
 [build-dependencies]
-tauri-build = { version = "2", optional = true }
+tauri-build = { version = "2.7.4", optional = true }
 
 [[bin]]
 name = "todo-sync-client"
