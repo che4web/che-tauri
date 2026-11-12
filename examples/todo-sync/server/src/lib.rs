@@ -77,14 +77,14 @@ pub async fn state(db: Database, token: &str) -> AppResult<AppState> {
     if db
         .query::<AuthToken>()
         .filter(AuthToken::KEY_HASH.eq(hash.clone()))
-        .first(&db)
+        .first()
         .await?
         .is_none()
     {
         let user = match db
             .query::<User>()
             .filter(User::USERNAME.eq("todo-demo"))
-            .first(&db)
+            .first()
             .await?
         {
             Some(user) => user,
